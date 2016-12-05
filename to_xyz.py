@@ -4,12 +4,14 @@ import sys
 
 PARAM_A = 1.
 PARAM_C = 1.
+VX = np.cos(2/6*np.pi) + 1
+VY = np.sin(2/6*np.pi)
 
 indices = np.array(json.load(sys.stdin))
 # row-based
 cellmatrix = np.diag([PARAM_A, PARAM_A, PARAM_C]) * np.array([
-	[1, 0, 0],
-	[np.cos(2/3*np.pi), np.sin(2/3*np.pi), 0],
+	[VX, -VY, 0],
+	[VX,  VY, 0],
 	[0, 0, 1],
 ])
 

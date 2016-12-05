@@ -1,20 +1,24 @@
 
-const GRID_DIM: Pos3 = (120, 120, 120);
-const NPARTICLE: usize = 10000;
+const GRID_DIM: Pos3 = (120, 120, 40);
+const NPARTICLE: usize = 1000;
+
+const LATTICE_A: f64 = 1f64;
+const LATTICE_C: f64 = 1f64;
+const CORE_RADIUS: f64 = 5f64;
 
 extern crate rand;
 use rand::Rng;
 use rand::distributions::{IndependentSample,Range};
 
 use std::io::Write;
+use std::f64::consts::PI;
 
 // NOTES:
 // * Coordinates are axial; (i,j) are coeffs of two of the three equivalent lattice vectors.
 //   The coefficient of the third is (-i-j).
 // * In practice this means the vectors corresponding to i and j are effectively
 //   (a-b) and (a-c), where (a,b,c) are equivalent under 3fold rotation.
-//   Thus there is a 60 degree angle between them
-// * Unit cell is obtuse:
+//   Thus there is a 60 degree angle between them, even though the unit cell is obtuse:
 //
 //    b________
 //     ^       \
@@ -62,29 +66,24 @@ impl Grid {
 
 	fn is_border(&self, pos: Pos3) -> bool {
 		let too_low = tuple_map(pos, |x| x == 0);
-		let too_high = tuple_zip_with(pos, self.dim, |p,d| p == d-1);
-		tuple_reduce(
-			tuple_zip_with(too_low, too_high, |a,b| a || b),
-			|a,b| a || b)
+		let too_high = tuple_zip_with(|p,d| p == d-1, pos, self.dim);
+		tuple_reduce(|a,b| a || b,
+			tuple_zip_with(|a,b| a && b,
+				(true,true,false), // permit the third coord to be zero
+				tuple_zip_with(|a,b| a || b, too_low, too_high),
+			),
+		)
 	}
+}
+
+const CELL_ANGLE: f64 = 2.*PI/6.; // 60 degrees; axial coord vectors are NOT images under C_3
+fn cartesian((i,j,k): Pos3) -> (f64,f64,f64) {
+	let (i,j,k) = (i as f64, j as f64, k as f64);
+	let (x,y,z) = ((CELL_ANGLE.cos() + 1.)*(i+j), CELL_ANGLE.sin()*(j-i), k);
+	(LATTICE_A * x, LATTICE_A * y, LATTICE_C * z)
 }
 
 fn mod_floor(a: i32, m: i32) -> i32 { ((a % m) + m) % m }
-
-fn output_dense<W: Write>(grid: &Grid, file: &mut W) {
-	for i in 0..grid.dim.0 {
-		for j in 0..grid.dim.1 {
-			let buf = grid.line((i as Pos, j as Pos)).iter()
-				.map(|&c| match c {
-					true  => b'#',
-					false => b'_',
-				}).collect::<Vec<_>>();
-			file.write_all(&buf);
-			writeln!(file, "");
-		}
-		writeln!(file, "");
-	}
-}
 
 fn output_sparse<W: Write>(grid: &Grid, file: &mut W) {
 	writeln!(file, "[");
@@ -125,12 +124,12 @@ fn tuple_replace((a,b,c): Pos3, i: usize, x: Pos) -> Pos3 {
 	}
 }
 
-fn tuple_zip_with<A,B,C,F:FnMut(A,B) -> C>((a1,a2,a3): (A,A,A), (b1,b2,b3): (B,B,B), mut f: F) -> (C,C,C) {
+fn tuple_zip_with<A,B,C,F:FnMut(A,B) -> C>(mut f: F, (a1,a2,a3): (A,A,A), (b1,b2,b3): (B,B,B)) -> (C,C,C) {
 	(f(a1,b1), f(a2,b2), f(a3,b3))
 }
-fn tuple_add(p: Pos3, q: Pos3) -> Pos3 { tuple_zip_with(p, q, |a,b| a+b) }
+fn tuple_add(p: Pos3, q: Pos3) -> Pos3 { tuple_zip_with(|a,b| a+b, p, q) }
 fn tuple_map<T, B, F:FnMut(T) -> B>((a,b,c): (T,T,T), mut f: F) -> (B,B,B) { (f(a), f(b), f(c)) }
-fn tuple_reduce<T, F:FnMut(T,T) -> T>((a,b,c): (T,T,T), mut f: F) -> T { let x = f(a,b); f(x,c) }
+fn tuple_reduce<T, F:FnMut(T,T) -> T>(mut f: F, (a,b,c): (T,T,T)) -> T { let x = f(a,b); f(x,c) }
 
 //---------- DLA
 
@@ -159,33 +158,29 @@ fn random_border_position(grid: &Grid) -> Pos3 {
 	// and edges/vertices of the cube are slightly favored
 	let mut rng = rand::thread_rng();
 
-	// randomly pick one of three cube faces
-	// (notice the other three faces are translationally equivalent)
-	let fixed_axis = rng.gen_range(0, 3);
+	// randomly pick a position in 3d space
+	let pos = tuple_map(grid.dim, |d| rng.gen_range(0,d));
 
-	// randomly pick a position on said face
-	let mut pos = (0,0,0);
-	for axis in 0..3 {
-		if axis == fixed_axis { continue }
-		let r = rng.gen_range(0, tuple_nth(grid.dim, axis));
-		pos = tuple_replace(pos, axis, r);
-	}
-
+	// project onto either the i=0 or j=0 face of the parallelepiped
+	let fixed_axis = rng.gen_range(0, 2);
+	let pos = tuple_replace(pos, fixed_axis, 0);
 	pos
 }
 
 fn add_nucleation_site(mut grid: Grid) -> Grid {
-	// a "cube" of fixed size;
-	// not actually a cube though since this is axial coordinates
-	let radius = 5;
-	let center = tuple_map(grid.dim, |x| x/2);
-	let (ri,rj,rk) = tuple_map(center, |x0| (x0-radius)..(x0+radius+1));
+	// a cylinder
+	let (ri,rj,rk) = tuple_map(grid.dim, |d| 0..d);
+	let (ci,cj,_) = tuple_map(grid.dim, |d| d/2);
 
 	for i in ri {
 	for j in rj.clone() {
-	for k in rk.clone() {
-		grid.set_occupied((i,j,k));
-	}}}
+		let (x,y,_) = cartesian((i-ci, j-cj, 0));
+		if (x*x + y*y) <= CORE_RADIUS*CORE_RADIUS + 1e-10 {
+			for k in rk.clone() {
+				grid.set_occupied((i,j,k));
+			}
+		}
+	}}
 	grid
 }
 
@@ -199,7 +194,7 @@ fn dla_run() -> Grid {
 	let collect_neighbors = |pos|
 		displacements.iter()
 			.map(|&disp| tuple_add(disp, pos))
-			.map(|pos| tuple_zip_with(pos, dim, mod_floor)) // wrap for PBCs
+			.map(|pos| tuple_zip_with(mod_floor, pos, dim)) // wrap for PBCs
 			.collect::<Vec<_>>();
 
 	let mut rng = rand::weak_rng();
