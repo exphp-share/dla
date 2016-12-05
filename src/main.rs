@@ -7,8 +7,10 @@ const LATTICE_C: f64 = 1f64;
 const CORE_RADIUS: f64 = 5f64;
 
 extern crate rand;
+extern crate homogenous;
 use rand::Rng;
 use rand::distributions::{IndependentSample,Range};
+use homogenous::prelude::*;
 
 use std::io::Write;
 use std::f64::consts::PI;
@@ -63,17 +65,6 @@ impl Grid {
 		let index = self.index(pos);
 		self.grid[index] = true;
 	}
-
-	fn is_border(&self, pos: Pos3) -> bool {
-		let too_low = tuple_map(pos, |x| x == 0);
-		let too_high = tuple_zip_with(|p,d| p == d-1, pos, self.dim);
-		tuple_reduce(|a,b| a || b,
-			tuple_zip_with(|a,b| a && b,
-				(true,true,false), // permit the third coord to be zero
-				tuple_zip_with(|a,b| a || b, too_low, too_high),
-			),
-		)
-	}
 }
 
 const CELL_ANGLE: f64 = 2.*PI/6.; // 60 degrees; axial coord vectors are NOT images under C_3
@@ -101,35 +92,6 @@ fn output_sparse<W: Write>(grid: &Grid, file: &mut W) {
 	}
 	writeln!(file, "]");
 }
-
-//------------
-// HACK: using tuple for Pos was a dumb idea; we can't index it.
-// type Pos3 = [i32; 3] would be better
-#[inline]
-fn tuple_nth(pos: Pos3, i: usize) -> Pos {
-	match i {
-		0 => pos.0,
-		1 => pos.1,
-		2 => pos.2,
-		_ => panic!("bad tuple index"),
-	}
-}
-#[inline]
-fn tuple_replace((a,b,c): Pos3, i: usize, x: Pos) -> Pos3 {
-	match i {
-		0 => (x,b,c),
-		1 => (a,x,c),
-		2 => (a,b,x),
-		_ => panic!("bad tuple index"),
-	}
-}
-
-fn tuple_zip_with<A,B,C,F:FnMut(A,B) -> C>(mut f: F, (a1,a2,a3): (A,A,A), (b1,b2,b3): (B,B,B)) -> (C,C,C) {
-	(f(a1,b1), f(a2,b2), f(a3,b3))
-}
-fn tuple_add(p: Pos3, q: Pos3) -> Pos3 { tuple_zip_with(|a,b| a+b, p, q) }
-fn tuple_map<T, B, F:FnMut(T) -> B>((a,b,c): (T,T,T), mut f: F) -> (B,B,B) { (f(a), f(b), f(c)) }
-fn tuple_reduce<T, F:FnMut(T,T) -> T>(mut f: F, (a,b,c): (T,T,T)) -> T { let x = f(a,b); f(x,c) }
 
 //---------- DLA
 
@@ -159,18 +121,18 @@ fn random_border_position(grid: &Grid) -> Pos3 {
 	let mut rng = rand::thread_rng();
 
 	// randomly pick a position in 3d space
-	let pos = tuple_map(grid.dim, |d| rng.gen_range(0,d));
+	let pos = grid.dim.map(|d| rng.gen_range(0,d));
 
 	// project onto either the i=0 or j=0 face of the parallelepiped
 	let fixed_axis = rng.gen_range(0, 2);
-	let pos = tuple_replace(pos, fixed_axis, 0);
+	let pos = pos.update_nth(fixed_axis, |_| 0);
 	pos
 }
 
 fn add_nucleation_site(mut grid: Grid) -> Grid {
 	// a cylinder
-	let (ri,rj,rk) = tuple_map(grid.dim, |d| 0..d);
-	let (ci,cj,_) = tuple_map(grid.dim, |d| d/2);
+	let (ri,rj,rk) = grid.dim.map(|d| 0..d);
+	let (ci,cj,_) = grid.dim.map(|d| d/2);
 
 	for i in ri {
 	for j in rj.clone() {
@@ -193,8 +155,8 @@ fn dla_run() -> Grid {
 	let dim = grid.dim; // to avoid capturing grid inside closure
 	let collect_neighbors = |pos|
 		displacements.iter()
-			.map(|&disp| tuple_add(disp, pos))
-			.map(|pos| tuple_zip_with(mod_floor, pos, dim)) // wrap for PBCs
+			.map(|&disp| disp.zip(pos).map(|(a,b)| a+b))
+			.map(|pos| pos.zip(dim).map(|(p,d)| mod_floor(p,d))) // wrap for PBCs
 			.collect::<Vec<_>>();
 
 	let mut rng = rand::weak_rng();
@@ -215,15 +177,17 @@ fn dla_run() -> Grid {
 			pos = neighbors[disp_index];
 		}
 
-		// attach immediately
-		grid.set_occupied(pos);
 		// don't want the structure to cross the border
 		// (heck, even just touching the border means it is already way too large and
 		//  has likely ruined the probability distribution)
-		if grid.is_border(pos) {
+		if pos.update_nth(2, |_| 1) // avoid triggering on the z axis
+				.any(|x| x == 0) {
 			writeln!(std::io::stderr(), "Warning: Touched border!");
 			break;
 		}
+
+		// attach immediately
+		grid.set_occupied(pos);
 	}
 	grid
 }
