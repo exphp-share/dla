@@ -7,6 +7,7 @@ const LATTICE_C: f64 = 1f64;
 const CORE_RADIUS: f64 = 5f64;
 
 extern crate rand;
+#[macro_use(zip_with)]
 extern crate homogenous;
 use rand::Rng;
 use rand::distributions::{IndependentSample,Range};
@@ -67,8 +68,13 @@ impl Grid {
 	}
 }
 
-const CELL_ANGLE: f64 = 2.*PI/6.; // 60 degrees; axial coord vectors are NOT images under C_3
 fn cartesian((i,j,k): Pos3) -> (f64,f64,f64) {
+	// 120 degrees; although the actual angle between the i and j vectors
+	//  is 60 degrees, the components below are written in terms of
+	//  vectors related by R3.
+	// The 60 degrees then is actually the angles of those vectors
+	//  to the x-axis.
+	const CELL_ANGLE: f64 = 2.*PI/6.;
 	let (i,j,k) = (i as f64, j as f64, k as f64);
 	let (x,y,z) = ((CELL_ANGLE.cos() + 1.)*(i+j), CELL_ANGLE.sin()*(j-i), k);
 	(LATTICE_A * x, LATTICE_A * y, LATTICE_C * z)
@@ -153,10 +159,9 @@ fn dla_run() -> Grid {
 
 	let displacements = neighbor_displacements();
 	let dim = grid.dim; // to avoid capturing grid inside closure
-	let collect_neighbors = |pos|
+	let collect_neighbors = |pos:Pos3|
 		displacements.iter()
-			.map(|&disp| disp.zip(pos).map(|(a,b)| a+b))
-			.map(|pos| pos.zip(dim).map(|(p,d)| mod_floor(p,d))) // wrap for PBCs
+			.map(|&disp| zip_with!((pos, disp, dim), |x,dx,m| mod_floor(x+dx, m)))
 			.collect::<Vec<_>>();
 
 	let mut rng = rand::weak_rng();
