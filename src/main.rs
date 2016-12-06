@@ -43,24 +43,15 @@ impl Grid {
 	fn new(dim: Pos3) -> Grid {
 		Grid {
 			dim: dim,
-			grid: vec![false; (dim.0 * dim.1 * dim.2) as usize],
+			grid: vec![false; dim.product() as usize],
 		}
 	}
 
 	fn strides(&self) -> Pos3 { (self.dim.1 * self.dim.2, self.dim.2, 1) }
 
-	fn index(&self, (p1,p2,p3): Pos3) -> usize {
-		let (s1,s2,s3) = self.strides();
-		let out = p1*s1 + p2*s2 + p3*s3;
-		out as usize
-	}
+	fn index(&self, pos: Pos3) -> usize { self.strides().dot(pos) as usize }
 
 	fn is_occupied(&self, pos: Pos3) -> Tile { self.grid[self.index(pos)] }
-
-	// slice of contiguous elements (i,j,*)
-	fn line(&self, (p1,p2): Pos2) -> &[Tile] {
-		&self.grid[self.index((p1,p2,0))..self.index((p1,p2+1,0))]
-	}
 
 	fn set_occupied(&mut self, pos: Pos3) {
 		let index = self.index(pos);
