@@ -3,13 +3,27 @@ name = "dla"
 version = "0.1.0"
 dependencies = [
  "homogenous 0.1.2 (git+file:///home/lampam/cpp/other/rust/homogenous)",
+ "itertools 0.5.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand 0.3.15 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
+
+[[package]]
+name = "either"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "homogenous"
 version = "0.1.2"
 source = "git+file:///home/lampam/cpp/other/rust/homogenous#f38bacf1a077cc69f5b26fa85b6b264cb11cf108"
+
+[[package]]
+name = "itertools"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = [
+ "either 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
 
 [[package]]
 name = "libc"
@@ -25,6 +39,8 @@ dependencies = [
 ]
 
 [metadata]
+"checksum either 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)" = "3d2b503c86dad62aaf414ecf2b8c527439abedb3f8d812537f0b12bfd6f32a91"
 "checksum homogenous 0.1.2 (git+file:///home/lampam/cpp/other/rust/homogenous)" = "<none>"
+"checksum itertools 0.5.6 (registry+https://github.com/rust-lang/crates.io-index)" = "4e80479061d4444bfb160054b66fa92cf45e5a6490aadec415ea214004198194"
 "checksum libc 0.2.18 (registry+https://github.com/rust-lang/crates.io-index)" = "a51822fc847e7a8101514d1d44e354ba2ffa7d4c194dcab48870740e327cac70"
 "checksum rand 0.3.15 (registry+https://github.com/rust-lang/crates.io-index)" = "022e0636ec2519ddae48154b028864bdce4eaf7d35226ab8e65c611be97b189d"

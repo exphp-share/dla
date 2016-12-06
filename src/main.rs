@@ -9,9 +9,13 @@ const CORE_RADIUS: f64 = 5f64;
 extern crate rand;
 #[macro_use(zip_with)]
 extern crate homogenous;
+#[macro_use(iproduct)]
+extern crate itertools;
+
 use rand::Rng;
 use rand::distributions::{IndependentSample,Range};
 use homogenous::prelude::*;
+use itertools::Itertools;
 
 use std::io::Write;
 use std::f64::consts::PI;
@@ -85,15 +89,13 @@ fn mod_floor(a: i32, m: i32) -> i32 { ((a % m) + m) % m }
 fn output_sparse<W: Write>(grid: &Grid, file: &mut W) {
 	writeln!(file, "[");
 	let mut first = true;
-	for i in 0..grid.dim.0 {
-		for j in 0..grid.dim.1 {
-			for k in 0..grid.dim.2 {
-				if grid.is_occupied((i,j,k)) {
-					if !first { write!(file, ",\n "); }
-					write!(file, "[{},{},{}]", i, j, k);
-					first = false;
-				}
-			}
+
+	let (ri,rj,rk) = grid.dim.map(|d| 0..d);
+	for (i,j,k) in iproduct!(ri, rj, rk) {
+		if grid.is_occupied((i,j,k)) {
+			if !first { write!(file, ",\n "); }
+			write!(file, "[{},{},{}]", i, j, k);
+			first = false;
 		}
 	}
 	writeln!(file, "]");
@@ -138,17 +140,14 @@ fn random_border_position(grid: &Grid) -> Pos3 {
 fn add_nucleation_site(mut grid: Grid) -> Grid {
 	// a cylinder
 	let (ri,rj,rk) = grid.dim.map(|d| 0..d);
-	let (ci,cj,_) = grid.dim.map(|d| d/2);
+	let center = grid.dim.map(|d| d/2);
 
-	for i in ri {
-	for j in rj.clone() {
-		let (x,y,_) = cartesian((i-ci, j-cj, 0));
+	for pos in iproduct!(ri, rj, rk) {
+		let (x,y,_) = cartesian(zip_with!((pos, center), |a,b| a-b));
 		if (x*x + y*y) <= CORE_RADIUS*CORE_RADIUS + 1e-10 {
-			for k in rk.clone() {
-				grid.set_occupied((i,j,k));
-			}
+			grid.set_occupied(pos);
 		}
-	}}
+	}
 	grid
 }
 
@@ -159,21 +158,18 @@ fn is_fillable(grid: &Grid, pos: Pos3) -> bool {
 	];
 
 	// is any set of 2 contiguous neighbors all filled?
-	let neighbors = disps_ccw_order.into_iter().map(|disp| grid.wrap(pos, disp)).collect::<Vec<_>>();
-	neighbors.iter().chain(&neighbors).collect::<Vec<_>>() // ensure last few have enough entries after them
-		.windows(2).any(|window| window.iter().all(|&&p| grid.is_occupied(p)))
+	let neighbors = disps_ccw_order.into_iter().map(|disp| grid.wrap(pos, disp)).collect_vec();
+	neighbors.iter()
+		.cycle().tuple_windows::<(_,_)>().take(neighbors.len())
+		.any(|(&p,&q)| grid.is_occupied(p) && grid.is_occupied(q))
 }
 
 fn dla_run() -> Grid {
 	let grid = Grid::new(GRID_DIM);
 	let grid = add_nucleation_site(grid);
+
 	let mut grid = grid;
-
-	let displacements = neighbor_displacements();
-	let dim = grid.dim; // to avoid capturing grid inside closure
-
 	let mut rng = rand::weak_rng();
-
 
 	for n in 0..NPARTICLE {
 		write!(std::io::stderr(), "Particle {} of {}: ", n, NPARTICLE);
@@ -183,10 +179,10 @@ fn dla_run() -> Grid {
 		loop {
 			if is_fillable(&grid, pos) { break }
 
-			let valid_moves: Vec<_> =
+			let valid_moves =
 				grid.neighbors(pos).into_iter()
 					.filter(|&x| !grid.is_occupied(x))
-					.collect();
+					.collect_vec();
 			pos = *rng.choose(&valid_moves).expect("no possible moves! (this is unexpected!)");
 		}
 

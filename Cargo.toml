@@ -1,0 +1,11 @@
+[package]
+name = "dla"
+version = "0.1.0"
+authors = ["Michael Lamparski <diagonaldevice@gmail.com>"]
+
+[dependencies]
+rand = "0.3"
+itertools = "0.5"
+
+[dependencies.homogenous]
+git = "file:///home/lampam/cpp/other/rust/homogenous"
