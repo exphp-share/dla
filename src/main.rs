@@ -1,5 +1,5 @@
 
-const GRID_DIM: Pos3 = (120, 120, 40);
+const GRID_DIM: Pos3 = (120, 120, 20);
 const NPARTICLE: usize = 1000;
 
 const LATTICE_A: f64 = 1f64;
@@ -37,6 +37,7 @@ type Pos3 = (i32, i32, i32);
 struct Grid {
 	dim: Pos3,
 	grid: Vec<Tile>,
+	displacements: Vec<Pos3>,
 }
 
 impl Grid {
@@ -44,13 +45,21 @@ impl Grid {
 		Grid {
 			dim: dim,
 			grid: vec![false; dim.product() as usize],
+			displacements: neighbor_displacements(),
 		}
 	}
 
 	fn strides(&self) -> Pos3 { (self.dim.1 * self.dim.2, self.dim.2, 1) }
 
-	fn index(&self, pos: Pos3) -> usize { self.strides().dot(pos) as usize }
+	fn index(&self, pos: Pos3) -> usize { zip_with!((self.strides(), pos), |s,p| s*p).sum() as usize }
 
+	fn neighbors(&self, pos: Pos3) -> Vec<Pos3> {
+		self.displacements.iter().map(|&disp| self.wrap(pos, disp)).collect()
+	}
+
+	fn wrap(&self, pos: Pos3, disp: Pos3) -> Pos3 {
+		zip_with!((pos, disp, self.dim), |x,dx,m| mod_floor(x+dx, m))
+	}
 	fn is_occupied(&self, pos: Pos3) -> Tile { self.grid[self.index(pos)] }
 
 	fn set_occupied(&mut self, pos: Pos3) {
@@ -99,13 +108,13 @@ fn neighbor_displacements() -> Vec<Pos3> {
 	let mut out = vec![];
 
 	// axial movement along Z
-	for i in vec![-1, 1] { out.push((i, 0, 0)) }
+	for i in vec![-1, 1] { out.push((0, 0, i)) }
 
 	// hexagonal movement in-plane
 	// These three tuples are the triangular lattice vectors in axial coords.
-	for (j,k) in vec![(0,1), (1,0), (-1,-1)] {
-		out.push((0, j, k));
-		out.push((0, -j, -k));
+	for (j,k) in vec![(0,1), (1,0), (1,-1)] {
+		out.push((j, k, 0));
+		out.push((-j, -k, 0));
 	}
 
 	out
@@ -143,6 +152,18 @@ fn add_nucleation_site(mut grid: Grid) -> Grid {
 	grid
 }
 
+fn is_fillable(grid: &Grid, pos: Pos3) -> bool {
+	let disps_ccw_order = vec![
+		( 1, 0, 0), ( 0, 1, 0), (-1, 1, 0),
+		(-1, 0, 0), ( 0,-1, 0), ( 1,-1, 0),
+	];
+
+	// is any set of 2 contiguous neighbors all filled?
+	let neighbors = disps_ccw_order.into_iter().map(|disp| grid.wrap(pos, disp)).collect::<Vec<_>>();
+	neighbors.iter().chain(&neighbors).collect::<Vec<_>>() // ensure last few have enough entries after them
+		.windows(2).any(|window| window.iter().all(|&&p| grid.is_occupied(p)))
+}
+
 fn dla_run() -> Grid {
 	let grid = Grid::new(GRID_DIM);
 	let grid = add_nucleation_site(grid);
@@ -150,28 +171,26 @@ fn dla_run() -> Grid {
 
 	let displacements = neighbor_displacements();
 	let dim = grid.dim; // to avoid capturing grid inside closure
-	let collect_neighbors = |pos:Pos3|
-		displacements.iter()
-			.map(|&disp| zip_with!((pos, disp, dim), |x,dx,m| mod_floor(x+dx, m)))
-			.collect::<Vec<_>>();
 
 	let mut rng = rand::weak_rng();
-	let disp_distribution = Range::new(0, displacements.len());
+
 
 	for n in 0..NPARTICLE {
-		writeln!(std::io::stderr(), "Particle {} of {}", n, NPARTICLE);
+		write!(std::io::stderr(), "Particle {} of {}: ", n, NPARTICLE);
 		let mut pos = random_border_position(&grid);
 
-		// is a nearby tile occupied?
-		for step in 0.. {
-			let neighbors = collect_neighbors(pos);
-			if neighbors.iter().any(|&p| grid.is_occupied(p)) { break }
+		// move until ready to place
+		loop {
+			if is_fillable(&grid, pos) { break }
 
-			// no need to worry about moving onto an occupied tile since we attach before
-			// we have the chance.
-			let disp_index = disp_distribution.ind_sample(&mut rng);
-			pos = neighbors[disp_index];
+			let valid_moves: Vec<_> =
+				grid.neighbors(pos).into_iter()
+					.filter(|&x| !grid.is_occupied(x))
+					.collect();
+			pos = *rng.choose(&valid_moves).expect("no possible moves! (this is unexpected!)");
 		}
+
+		// place the particle
 
 		// don't want the structure to cross the border
 		// (heck, even just touching the border means it is already way too large and
@@ -182,8 +201,8 @@ fn dla_run() -> Grid {
 			break;
 		}
 
-		// attach immediately
 		grid.set_occupied(pos);
+		writeln!(std::io::stderr(), "{:?}", pos);
 	}
 	grid
 }
