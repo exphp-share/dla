@@ -7,8 +7,8 @@ import sys
 if sys.stdout.isatty():
 	print("Reading from STDIN...", file=sys.stderr)
 
-PARAM_A = 1.
-PARAM_C = 2.
+PARAM_A = 2.4
+PARAM_C = 6.
 # i and j are axial vectors with 60 degrees between them;
 # the coordinates are described here in terms of vectors which
 # are 120 degrees apart; but they are centered about the x axis,
@@ -22,7 +22,8 @@ PARAM_C = 2.
 VX = np.cos(2/6*np.pi) + 1
 VY = np.sin(2/6*np.pi)
 
-indices = np.array(json.load(sys.stdin))
+symbols,indices = zip(*json.load(sys.stdin))
+
 # row-based
 cellmatrix = np.diag([PARAM_A, PARAM_A, PARAM_C]).dot(np.array([
 	[VX, -VY, 0],
@@ -30,10 +31,11 @@ cellmatrix = np.diag([PARAM_A, PARAM_A, PARAM_C]).dot(np.array([
 	[0, 0, 1],
 ]))
 
-cartesian = indices.dot(cellmatrix)
-print(len(cartesian))
+cartesian = np.array(indices).dot(cellmatrix)
+print(2*len(cartesian))
 print("blah blah blah") # xyz comment
-for (x,y,z) in cartesian:
-	print("C {} {} {}".format(x,y,z))
+for symbol,(x,y,z) in zip(symbols, cartesian):
+	print("{} {} {} {}".format(symbol, x, y, z))
+	print("{} {} {} {}".format(symbol, x+PARAM_A, y, z))
 
 

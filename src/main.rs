@@ -1,11 +1,12 @@
+const DIMENSION: Trip<f64> = (240., 240., 40.);
+const NPARTICLE: usize = 10000;
 
-const GRID_DIM: Pos3 = (120, 120, 20);
-const NPARTICLE: usize = 1000;
-
-const LATTICE_A: f64 = 1f64;
-const LATTICE_C: f64 = 1f64;
 const CORE_RADIUS: f64 = 5f64;
+const INTRA_CHAIN_SEP: Cart = Cart(2f64);
+const PARTICLE_RADIUS: Cart = Cart(1f64);
+const MOVE_RADIUS: Cart = Cart(1f64);
 
+extern crate time;
 extern crate rand;
 #[macro_use(zip_with)]
 extern crate homogenous;
@@ -13,197 +14,243 @@ extern crate homogenous;
 extern crate itertools;
 
 use rand::Rng;
-use rand::distributions::{IndependentSample,Range};
+use rand::distributions::{IndependentSample,Normal};
 use homogenous::prelude::*;
-use itertools::Itertools;
+use homogenous::numeric::prelude::*;
+use time::precise_time_ns;
 
 use std::io::Write;
-use std::f64::consts::PI;
 
-// NOTES:
-// * Coordinates are axial; (i,j) are coeffs of two of the three equivalent lattice vectors.
-//   The coefficient of the third is (-i-j).
-// * In practice this means the vectors corresponding to i and j are effectively
-//   (a-b) and (a-c), where (a,b,c) are equivalent under 3fold rotation.
-//   Thus there is a 60 degree angle between them, even though the unit cell is obtuse:
-//
-//    b________
-//     ^       \
-//      \       \
-//       \______>\a
-//       0
+type Trip<T> = (T,T,T);
 
+// For statically proving that fractional/cartesian conversions are handled properly.
+#[derive(PartialEq,PartialOrd,Copy,Clone)]
+struct Frac(f64);
+#[derive(PartialEq,PartialOrd,Copy,Clone)]
+struct Cart(f64);
+impl Frac { pub fn cart(self, dimension: f64) -> Cart { Cart(self.0*dimension) } }
+impl Cart { pub fn frac(self, dimension: f64) -> Frac { Frac((self.0/dimension).fract()) } }
 
-type Tile = bool; // true when occupied
-type Pos = i32;
-type Pos2 = (i32, i32);
-type Pos3 = (i32, i32, i32);
-struct Grid {
-	dim: Pos3,
-	grid: Vec<Tile>,
-	displacements: Vec<Pos3>,
-}
+// add common binops to eliminate the majority of reasons I might need to
+// convert back into floats (which would render the type system useless)
+macro_rules! impl_binop { ($T:ident, $trt:ident, $func:ident, $op:tt) => {
+	impl $trt<$T> for $T {
+		type Output = $T;
+		fn $func(self, other: $T) -> $T { $T(self.0 $op other.0) }
+	}
+	impl $trt<f64> for $T {
+		type Output = $T;
+		fn $func(self, other: f64) -> $T { $T(self.0 $op other) }
+	}
+};}
+use ::std::ops::{Add,Sub,Mul,Div,Rem};
+impl_binop!(Cart, Mul, mul, *);
+impl_binop!(Cart, Add, add, +);
+impl_binop!(Cart, Sub, sub, -);
+impl_binop!(Cart, Div, div, /);
+impl_binop!(Cart, Rem, rem, %);
+impl_binop!(Frac, Mul, mul, *);
+impl_binop!(Frac, Add, add, +);
+impl_binop!(Frac, Sub, sub, -);
+impl_binop!(Frac, Div, div, /);
+impl_binop!(Frac, Rem, rem, %);
 
-impl Grid {
-	fn new(dim: Pos3) -> Grid {
-		Grid {
-			dim: dim,
-			grid: vec![false; dim.product() as usize],
-			displacements: neighbor_displacements(),
+// fulfills two needs which BTreeMap fails to satisfy:
+//  * support for PartialOrd
+//  * multiple values may have same key
+type Key = Frac;
+type Value = usize;
+struct SortedIndices {keys: Vec<Key>, values: Vec<Value>}
+impl SortedIndices {
+	fn new() -> Self { SortedIndices { keys: vec![], values: vec![] } }
+
+	fn insert(&mut self, k: Key, v: Value) {
+		let i = self.lower_bound(k);
+		self.keys.insert(i, k); self.values.insert(i, v);
+	}
+
+	fn lower_bound(&self, k: Key) -> usize {
+		match self.keys.binary_search_by(|b| k.partial_cmp(b).unwrap()) {
+			Ok(x) => x, Err(x) => x,
 		}
 	}
 
-	fn strides(&self) -> Pos3 { (self.dim.1 * self.dim.2, self.dim.2, 1) }
-
-	fn index(&self, pos: Pos3) -> usize { zip_with!((self.strides(), pos), |s,p| s*p).sum() as usize }
-
-	fn neighbors(&self, pos: Pos3) -> Vec<Pos3> {
-		self.displacements.iter().map(|&disp| self.wrap(pos, disp)).collect()
+	fn upper_bound(&self, k: Key) -> usize {
+		let i = self.lower_bound(k);
+		for i in i+1..self.keys.len() {
+			if self.keys[i] > k { return i; }
+		}
+		return self.keys.len();
 	}
 
-	fn wrap(&self, pos: Pos3, disp: Pos3) -> Pos3 {
-		zip_with!((pos, disp, self.dim), |x,dx,m| mod_floor(x+dx, m))
-	}
-	fn is_occupied(&self, pos: Pos3) -> Tile { self.grid[self.index(pos)] }
-
-	fn set_occupied(&mut self, pos: Pos3) {
-		let index = self.index(pos);
-		self.grid[index] = true;
+	fn range(&self, from: Key, to: Key) -> &[Value] {
+		&self.values[self.lower_bound(from)..self.upper_bound(to)]
 	}
 }
 
-fn cartesian((i,j,k): Pos3) -> (f64,f64,f64) {
-	// 120 degrees; although the actual angle between the i and j vectors
-	//  is 60 degrees, the components below are written in terms of
-	//  vectors related by R3.
-	// The 60 degrees then is actually the angles of those vectors
-	//  to the x-axis.
-	const CELL_ANGLE: f64 = 2.*PI/6.;
-	let (i,j,k) = (i as f64, j as f64, k as f64);
-	let (x,y,z) = ((CELL_ANGLE.cos() + 1.)*(i+j), CELL_ANGLE.sin()*(j-i), k);
-	(LATTICE_A * x, LATTICE_A * y, LATTICE_C * z)
+fn intersection(a: Vec<usize>, b: Vec<usize>) -> Vec<usize> {
+	// hm, can't find anything on cargo. Itertools only has unions (merge).
+	// we'll do O(m*n) because the sets are almost always expected to be size 0.
+	a.into_iter().filter(|x| b.iter().any(|y| x == y)).collect()
 }
 
-fn mod_floor(a: i32, m: i32) -> i32 { ((a % m) + m) % m }
+// We track two sorted lists of atoms along each axis; one in the range [0,1],
+// and one in the range [0.5,1.5].
+#[derive(Copy,Clone,Hash,Debug,Ord,PartialOrd,Eq,PartialEq)]
+enum Region { Center = 0, Boundary = 1 }
+use Region::*;
+impl Region {
+	fn categorize(Frac(x): Frac) -> Region {
+		if 0.25 <= x && x <= 0.75 { Center } else { Boundary }
+	}
+	fn image_of(self, Frac(x): Frac) -> Frac { match self {
+		Center => Frac(x),
+		Boundary => Frac(0.5 + (x + 0.5).fract()),
+	}}
+}
 
-fn output_sparse<W: Write>(grid: &Grid, file: &mut W) {
-	writeln!(file, "[");
-	let mut first = true;
+struct State {
+	labels: Vec<&'static str>,
+	positions: Vec<Trip<Cart>>,
+	dimension: Trip<f64>,
+	sorted: Trip<[SortedIndices; 2]>,
+}
 
-	let (ri,rj,rk) = grid.dim.map(|d| 0..d);
-	for (i,j,k) in iproduct!(ri, rj, rk) {
-		if grid.is_occupied((i,j,k)) {
-			if !first { write!(file, ",\n "); }
-			write!(file, "[{},{},{}]", i, j, k);
-			first = false;
+impl State {
+	fn new(dimension: Trip<f64>) -> State {
+		State {
+			labels: vec![],
+			positions: vec![],
+			dimension: dimension,
+			sorted: (0,0,0).map(|_| [SortedIndices::new(), SortedIndices::new()]),
 		}
 	}
-	writeln!(file, "]");
+
+	fn insert(&mut self, label: &'static str, point: Trip<Frac>) {
+		let i = self.positions.len();
+		self.positions.push(point.cart(self.dimension));
+		self.labels.push(label);
+		for (x,sets) in point.zip(self.sorted.as_mut()).into_iter() {
+			sets[Center   as usize].insert(Center.image_of(x),   i);
+			sets[Boundary as usize].insert(Boundary.image_of(x), i);
+		}
+	}
+
+	fn cubic_neighborhood(&self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
+		zip_with!((point, self.sorted.as_ref(), self.dimension), |x, sets: &[SortedIndices; 2], dim| {
+			let region = Region::categorize(x);
+			let radius = radius.frac(dim);
+			let x = region.image_of(x);
+			sets[region as usize].range(x - radius, x + radius).to_vec()
+		}).fold1(intersection)
+	}
+
+	fn neighborhood_from_candidates<I: IntoIterator<Item=usize>>(&self, frac: Trip<Frac>, radius: Cart, indices: I) -> Vec<usize> {
+		let cart = frac.cart(self.dimension);
+
+		indices.into_iter().filter(|&i| {
+			let displacement = cart.sub_v(self.positions[i]);
+			displacement.sqnorm() <= radius*radius
+		}).collect()
+	}
+
+	fn neighborhood(&self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
+		let candidates = self.cubic_neighborhood(point, radius);
+		self.neighborhood_from_candidates(point, radius, candidates)
+	}
+
+	fn bruteforce_neighborhood(&self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
+		self.neighborhood_from_candidates(point, radius, 0..self.positions.len())
+	}
+}
+
+trait ToCart { fn cart(self, dimension: Trip<f64>) -> Trip<Cart>; }
+trait ToFrac { fn frac(self, dimension: Trip<f64>) -> Trip<Frac>; }
+impl ToCart for Trip<Frac> { fn cart(self, dimension: Trip<f64>) -> Trip<Cart> { zip_with!((self,dimension), |x:Frac,d| x.cart(d)) } }
+impl ToFrac for Trip<Cart> { fn frac(self, dimension: Trip<f64>) -> Trip<Frac> { zip_with!((self,dimension), |x:Cart,d| x.frac(d)) } }
+
+fn output<W: Write>(state: &State, file: &mut W) {
+	writeln!(file, "[").unwrap();
+	let mut first = false;
+	for (&(Cart(x),Cart(y),Cart(z)), label) in state.positions.iter().zip(&state.labels) {
+		write!(file, "{}", if first { "" } else { ",\n " }).unwrap();
+		write!(file, "[{:?},[{},{},{}]]", label, x, y, z).unwrap();
+		first = false;
+	}
+	writeln!(file, "]").unwrap();
 }
 
 //---------- DLA
 
-// NOTES:
-// * 8 directions; 2 axial, 6 planar
-// * All 8 have equal weight; this is pretty unisotropic
-fn neighbor_displacements() -> Vec<Pos3> {
-	let mut out = vec![];
+fn random_direction<R:Rng>(rng: &mut R) -> Trip<Cart> {
+	let normal = Normal::new(0.0, 1.0);
+	let x = normal.ind_sample(rng);
+	let y = normal.ind_sample(rng);
+	let z = normal.ind_sample(rng);
 
-	// axial movement along Z
-	for i in vec![-1, 1] { out.push((0, 0, i)) }
+	let vec = (x,y,z);
+	let length = vec.sqnorm().sqrt();
+	vec.map(|x| Cart(x / length))
+}
 
-	// hexagonal movement in-plane
-	// These three tuples are the triangular lattice vectors in axial coords.
-	for (j,k) in vec![(0,1), (1,0), (1,-1)] {
-		out.push((j, k, 0));
-		out.push((-j, -k, 0));
+fn random_border_position<R:Rng>(rng: &mut R) -> Trip<Frac> {
+	// this makes no attempt to be isotropic,
+	// as evidenced by the fact that it works entirely in terms of fractional coords
+
+	// place onto either the i=0 or j=0 face of the cuboid
+	let o = Frac(0.);
+	let x = Frac(rng.next_f64());
+	let z = Frac(rng.next_f64());
+	match rng.gen_range(0, 2) {
+		0 => (x, o, z),
+		1 => (o, x, z),
+		_ => unreachable!(),
 	}
-
-	out
 }
 
-fn random_border_position(grid: &Grid) -> Pos3 {
-	// this makes no attempt to be isotropic;
-	// the angle distribution is "not quite right",
-	// and edges/vertices of the cube are slightly favored
-	let mut rng = rand::thread_rng();
-
-	// randomly pick a position in 3d space
-	let pos = grid.dim.map(|d| rng.gen_range(0,d));
-
-	// project onto either the i=0 or j=0 face of the parallelepiped
-	let fixed_axis = rng.gen_range(0, 2);
-	let pos = pos.update_nth(fixed_axis, |_| 0);
-	pos
-}
-
-fn add_nucleation_site(mut grid: Grid) -> Grid {
-	// a cylinder
-	let (ri,rj,rk) = grid.dim.map(|d| 0..d);
-	let center = grid.dim.map(|d| d/2);
-
-	for pos in iproduct!(ri, rj, rk) {
-		let (x,y,_) = cartesian(zip_with!((pos, center), |a,b| a-b));
-		if (x*x + y*y) <= CORE_RADIUS*CORE_RADIUS + 1e-10 {
-			grid.set_occupied(pos);
-		}
+fn add_nucleation_site(mut state: State) -> State {
+	let n = (Cart(state.dimension.2) / INTRA_CHAIN_SEP).0.round() as i32;
+	for i in 0i32..n {
+		state.insert("Si", (Frac(0.), Frac(0.), Frac(i as f64 / n as f64)));
 	}
-	grid
+	state
 }
 
-fn is_fillable(grid: &Grid, pos: Pos3) -> bool {
-	let disps_ccw_order = vec![
-		( 1, 0, 0), ( 0, 1, 0), (-1, 1, 0),
-		(-1, 0, 0), ( 0,-1, 0), ( 1,-1, 0),
-	];
+fn dla_run() -> State {
+	let state = State::new(DIMENSION);
+	let state = add_nucleation_site(state);
+	let mut state = state;
 
-	// is any set of 2 contiguous neighbors all filled?
-	let neighbors = disps_ccw_order.into_iter().map(|disp| grid.wrap(pos, disp)).collect_vec();
-	neighbors.iter()
-		.cycle().tuple_windows::<(_,_)>().take(neighbors.len())
-		.any(|(&p,&q)| grid.is_occupied(p) && grid.is_occupied(q))
-}
-
-fn dla_run() -> Grid {
-	let grid = Grid::new(GRID_DIM);
-	let grid = add_nucleation_site(grid);
-
-	let mut grid = grid;
 	let mut rng = rand::weak_rng();
 
 	for n in 0..NPARTICLE {
-		write!(std::io::stderr(), "Particle {} of {}: ", n, NPARTICLE);
-		let mut pos = random_border_position(&grid);
+		write!(std::io::stderr(), "Particle {:8} of {:8}: ", n, NPARTICLE).unwrap();
+		let start_time = precise_time_ns();
+
+		let mut pos = random_border_position(&mut rng);
 
 		// move until ready to place
 		loop {
-			if is_fillable(&grid, pos) { break }
+			writeln!(std::io::stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
+				(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
+			let neighbors = state.neighborhood(pos, Cart(2.)*MOVE_RADIUS + PARTICLE_RADIUS);
+			if !neighbors.is_empty() { break }
 
-			let valid_moves =
-				grid.neighbors(pos).into_iter()
-					.filter(|&x| !grid.is_occupied(x))
-					.collect_vec();
-			pos = *rng.choose(&valid_moves).expect("no possible moves! (this is unexpected!)");
+			let c_dir = random_direction(&mut rng);
+			let c_disp = c_dir.mul_s(MOVE_RADIUS);
+			let f_disp = c_disp.frac(state.dimension);
+			pos = pos.add_v(f_disp);
 		}
 
 		// place the particle
-
-		// don't want the structure to cross the border
-		// (heck, even just touching the border means it is already way too large and
-		//  has likely ruined the probability distribution)
-		if pos.update_nth(2, |_| 1) // avoid triggering on the z axis
-				.any(|x| x == 0) {
-			writeln!(std::io::stderr(), "Warning: Touched border!");
-			break;
-		}
-
-		grid.set_occupied(pos);
-		writeln!(std::io::stderr(), "{:?}", pos);
+		state.insert("C", pos);
+		writeln!(std::io::stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
+			(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
 	}
-	grid
+	state
 }
 
 fn main() {
-	let mut grid = dla_run();
-	output_sparse(&grid, &mut std::io::stdout());
+	let state = dla_run();
+	output(&state, &mut std::io::stdout());
 }
