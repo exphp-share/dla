@@ -94,26 +94,13 @@ fn intersection(a: Vec<usize>, b: Vec<usize>) -> Vec<usize> {
 	a.into_iter().filter(|x| b.iter().any(|y| x == y)).collect()
 }
 
-// We track two sorted lists of atoms along each axis; one in the range [0,1],
-// and one in the range [0.5,1.5].
-#[derive(Copy,Clone,Hash,Debug,Ord,PartialOrd,Eq,PartialEq)]
-enum Region { Center = 0, Boundary = 1 }
-use Region::*;
-impl Region {
-	fn categorize(Frac(x): Frac) -> Region {
-		if 0.25 <= x && x <= 0.75 { Center } else { Boundary }
-	}
-	fn image_of(self, Frac(x): Frac) -> Frac { match self {
-		Center => Frac(x),
-		Boundary => Frac(0.5 + (x + 0.5).fract()),
-	}}
-}
 
 struct State {
 	labels: Vec<&'static str>,
 	positions: Vec<Trip<Cart>>,
 	dimension: Trip<f64>,
-	sorted: Trip<[SortedIndices; 2]>,
+	// Contains images in the fractional range [-0.5, 1.5] along each axis
+	sorted: Trip<SortedIndices>,
 }
 
 impl State {
@@ -122,7 +109,7 @@ impl State {
 			labels: vec![],
 			positions: vec![],
 			dimension: dimension,
-			sorted: (0,0,0).map(|_| [SortedIndices::new(), SortedIndices::new()]),
+			sorted: ((),(),()).map(|_| SortedIndices::new()),
 		}
 	}
 
@@ -130,18 +117,19 @@ impl State {
 		let i = self.positions.len();
 		self.positions.push(point.cart(self.dimension));
 		self.labels.push(label);
-		for (x,sets) in point.zip(self.sorted.as_mut()).into_iter() {
-			sets[Center   as usize].insert(Center.image_of(x),   i);
-			sets[Boundary as usize].insert(Boundary.image_of(x), i);
-		}
+
+		zip_with!((point, self.sorted.as_mut()), |Frac(x), set: &mut SortedIndices| {
+			set.insert(Frac(x), i);
+			if 0.0 <= x && x <= 0.5 { set.insert(Frac(x + 1.0), i); }
+			else if        x <= 1.0 { set.insert(Frac(x - 1.0), i); }
+			else { panic!("fractional out of range"); }
+		});
 	}
 
-	fn cubic_neighborhood(&self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
-		zip_with!((point, self.sorted.as_ref(), self.dimension), |x, sets: &[SortedIndices; 2], dim| {
-			let region = Region::categorize(x);
+	fn cubic_neighborhood(&mut self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
+		zip_with!((point, self.sorted.as_ref(), self.dimension), |x, set: &SortedIndices, dim| {
 			let radius = radius.frac(dim);
-			let x = region.image_of(x);
-			sets[region as usize].range(x - radius, x + radius).to_vec()
+			set.range(x - radius, x + radius).to_vec()
 		}).fold1(intersection)
 	}
 
@@ -154,7 +142,7 @@ impl State {
 		}).collect()
 	}
 
-	fn neighborhood(&self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
+	fn neighborhood(&mut self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
 		let candidates = self.cubic_neighborhood(point, radius);
 		self.neighborhood_from_candidates(point, radius, candidates)
 	}
@@ -231,8 +219,8 @@ fn dla_run() -> State {
 
 		// move until ready to place
 		loop {
-			writeln!(std::io::stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
-				(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
+		//	writeln!(std::io::stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
+		//		(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
 			let neighbors = state.neighborhood(pos, Cart(2.)*MOVE_RADIUS + PARTICLE_RADIUS);
 			if !neighbors.is_empty() { break }
 
