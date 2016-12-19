@@ -1,5 +1,5 @@
-const DIMENSION: Trip<Float> = (240., 240., 40.);
-const NPARTICLE: usize = 10000;
+const DIMENSION: Trip<Float> = (500., 500., 100.);
+const NPARTICLE: usize = 1500;
 
 const CORE_RADIUS: Float = 5.0;
 const INTRA_CHAIN_SEP: Cart = Cart(2.);
@@ -12,6 +12,8 @@ extern crate rand;
 extern crate homogenous;
 #[macro_use(iproduct)]
 extern crate itertools;
+#[macro_use]
+extern crate newtype_ops;
 
 use rand::Rng;
 use rand::distributions::{IndependentSample,Normal};
@@ -21,7 +23,7 @@ use time::precise_time_ns;
 
 use std::io::Write;
 
-type Float = f32;
+type Float = f64;
 type Trip<T> = (T,T,T);
 
 // For statically proving that fractional/cartesian conversions are handled properly.
@@ -34,27 +36,7 @@ impl Cart { pub fn frac(self, dimension: Float) -> Frac { Frac(self.0/dimension)
 
 // add common binops to eliminate the majority of reasons I might need to
 // convert back into floats (which would render the type system useless)
-macro_rules! impl_binop { ($T:ident, $trt:ident, $func:ident, $op:tt) => {
-	impl $trt<$T> for $T {
-		type Output = $T;
-		fn $func(self, other: $T) -> $T { $T(self.0 $op other.0) }
-	}
-	impl $trt<Float> for $T {
-		type Output = $T;
-		fn $func(self, other: Float) -> $T { $T(self.0 $op other) }
-	}
-};}
-use ::std::ops::{Add,Sub,Mul,Div,Rem};
-impl_binop!(Cart, Mul, mul, *);
-impl_binop!(Cart, Add, add, +);
-impl_binop!(Cart, Sub, sub, -);
-impl_binop!(Cart, Div, div, /);
-impl_binop!(Cart, Rem, rem, %);
-impl_binop!(Frac, Mul, mul, *);
-impl_binop!(Frac, Add, add, +);
-impl_binop!(Frac, Sub, sub, -);
-impl_binop!(Frac, Div, div, /);
-impl_binop!(Frac, Rem, rem, %);
+newtype_ops!{ {[Frac][Cart]} arithmetic {:=} {^&}Self {^&}Self }
 
 // fulfills two needs which BTreeMap fails to satisfy:
 //  * support for PartialOrd
@@ -202,7 +184,7 @@ impl ToFrac for Trip<Cart> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac>
 
 fn output<W: Write>(state: &State, file: &mut W) {
 	writeln!(file, "[").unwrap();
-	let mut first = false;
+	let mut first = true;
 	for (&(Cart(x),Cart(y),Cart(z)), label) in state.positions.iter().zip(&state.labels) {
 		write!(file, "{}", if first { "" } else { ",\n " }).unwrap();
 		write!(file, "[{:?},[{},{},{}]]", label, x, y, z).unwrap();
@@ -248,11 +230,11 @@ fn add_nucleation_site(mut state: State) -> State {
 }
 
 use std::collections::vec_deque::VecDeque;
-#[derive(Default)]
 struct Timer { deque: VecDeque<u64> }
 impl Timer {
 	pub fn new(n: usize) -> Timer {
 		let mut this = Timer { deque: VecDeque::new() };
+		// Fill solely for ease of implementation (the first few outputs may be inaccurate)
 		while this.deque.len() < n { this.deque.push_back(precise_time_ns()) }
 		this
 	}
@@ -305,7 +287,7 @@ fn dla_run() -> State {
 		state.insert("C", pos);
 
 		timer.push();
-		writeln!(std::io::stderr(), "({:14},{:14},{:14})  ({:8?} ms)  (avg: {:8?} ms)",
+		writeln!(std::io::stderr(), "({:22},{:22},{:22})  ({:8?} ms)  (avg: {:8?} ms)",
 			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms()
 		).unwrap();
 	}
