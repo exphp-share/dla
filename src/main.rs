@@ -282,7 +282,7 @@ fn dimer_potential((x,y,z): Trip<Float>) -> Float {
 
 	let square = |x| x*x;
 	RADIUS_STRENGTH * square(r - TARGET_RADIUS)
-	+ THETA_STRENGTH * square((6.*theta).sin())
+	+ THETA_STRENGTH * square((3.*theta).sin())
 }
 
 fn dimer_gradient((x,y,z): Trip<Float>) -> Trip<Float> {
@@ -294,6 +294,14 @@ fn dimer_gradient((x,y,z): Trip<Float>) -> Trip<Float> {
 		(dimer_potential((x, y, z+dz)) - dimer_potential((x, y, z-dz)))/(2.*dz),
 	)
 }
+
+//#[link(name="sp2_ifc", kind="static")]
+extern "C" {
+	// FIXME names
+	fn calc_potential (n: isize, a: *mut f64, b: *mut f64, c: *mut f64, d: *mut f64);
+	fn relax_structure(n: isize, a: *mut f64, b: *mut f64, c: *mut f64, d: *mut f64);
+}
+
 
 extern crate ncg_min;
 use ncg_min::{Rn, NonlinearCG, NonlinearCGError};
