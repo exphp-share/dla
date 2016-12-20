@@ -8,6 +8,10 @@ time = "0.1"
 rand = "0.3"
 itertools = "0.5"
 newtype-ops = "0.1.3"
+#rustimization = "*"
+
+[dependencies.ncg_min]
+git = "https://github.com/rekka/ncg_min"
 
 [dependencies.homogenous]
 git = "file:///home/lampam/cpp/other/rust/homogenous"

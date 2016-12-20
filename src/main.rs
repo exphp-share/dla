@@ -2,9 +2,13 @@ const DIMENSION: Trip<Float> = (500., 500., 100.);
 const NPARTICLE: usize = 1500;
 
 const CORE_RADIUS: Float = 5.0;
-const INTRA_CHAIN_SEP: Cart = Cart(2.);
+const INTRA_CHAIN_SEP: Cart = Cart(1.);
 const PARTICLE_RADIUS: Cart = Cart(1.);
 const MOVE_RADIUS: Cart = Cart(1.);
+
+const THETA_STRENGTH: Float = 1.0;
+const RADIUS_STRENGTH: Float = 1.0;
+const TARGET_RADIUS: Float = 1.0;
 
 extern crate time;
 extern crate rand;
@@ -36,7 +40,7 @@ impl Cart { pub fn frac(self, dimension: Float) -> Frac { Frac(self.0/dimension)
 
 // add common binops to eliminate the majority of reasons I might need to
 // convert back into floats (which would render the type system useless)
-newtype_ops!{ {[Frac][Cart]} arithmetic {:=} {^&}Self {^&}Self }
+newtype_ops!{ {[Frac][Cart]} arithmetic {:=} {^&}Self {^&}{Self f64} }
 
 // fulfills two needs which BTreeMap fails to satisfy:
 //  * support for PartialOrd
@@ -140,7 +144,7 @@ impl State {
 		self.labels.push(label);
 
 		zip_with!((point, self.sorted.as_mut()), |Frac(x), set: &mut SortedIndices| {
-			assert!(0.0 <= x && x <= 1.0);
+			assert!(0.0 <= x && x <= 1.0, "{}", x);
 			set.insert(Frac(x), i);
 			set.insert(Frac(x - 1.0), i);
 			set.insert(Frac(x + 1.0), i);
@@ -250,6 +254,103 @@ impl Timer {
 	}
 }
 
+// A simple interaction potential which tries to encourage honeycomb formation.
+// For a free dimer approaching a fixed dimer, the potential prefers:
+// * Similar dimer orientation.
+// * Distance between centers equal to the unit cell parameter (in the triangular lattice)
+// * Angle between dimer axis and displacement between centers equal to 0, 60, or 120 degrees.
+//
+// The first can be optimized independently of everything else;
+// Simply take all dimers to be oriented along the x axis.
+//
+// Optimizing the center of the dimer is less straight forward because
+// a free dimer may interact with multiple fixed dimers.
+//
+// Each interaction involves r^2 terms and sin(6 theta)^2 terms.
+/*fn dimer_potential((Cart(x),Cart(y),Cart(z)): Trip<Cart>) -> Float {
+	let r = (x*x + y*y + z*z).sqrt();
+	let theta = (x/r).acos();
+
+	let square = |x| x*x;
+	RADIUS_STRENGTH * square(r - TARGET_RADIUS)
+	+ THETA_STRENGTH * square((6.*theta).sin())
+}*/
+
+fn dimer_potential((x,y,z): Trip<Float>) -> Float {
+	let r = (x*x + y*y + z*z).sqrt();
+	let theta = (x/r).acos();
+
+	let square = |x| x*x;
+	RADIUS_STRENGTH * square(r - TARGET_RADIUS)
+	+ THETA_STRENGTH * square((6.*theta).sin())
+}
+
+fn dimer_gradient((x,y,z): Trip<Float>) -> Trip<Float> {
+	let (dx,dy,dz) = DIMENSION.map(|x| x*2f64.powi(-36));
+//	let (dx,dy,dz) = DIMENSION.map(|x| x*2f64.powi(-20));
+	(
+		(dimer_potential((x+dx, y, z)) - dimer_potential((x-dx, y, z)))/(2.*dx),
+		(dimer_potential((x, y+dy, z)) - dimer_potential((x, y-dy, z)))/(2.*dy),
+		(dimer_potential((x, y, z+dz)) - dimer_potential((x, y, z-dz)))/(2.*dz),
+	)
+}
+
+extern crate ncg_min;
+use ncg_min::{Rn, NonlinearCG, NonlinearCGError};
+fn relax(fixed_dimers: Vec<Trip<Cart>>, pos: Trip<Cart>) -> Result<Trip<Cart>, NonlinearCGError<Rn<Float>>> {
+	let fixed_dimers: Vec<_> = fixed_dimers.into_iter().map(|x| x.map(|x| x.0)).collect();
+	let pos = pos.map(|x| x.0);
+
+	let f = |x: &Rn<Float>, grad: &mut Rn<Float>| {
+		let pos = (x[0], x[1], x[2]);
+		let pot = fixed_dimers.iter()
+			.map(|&pos0| dimer_potential(pos.sub_v(pos0)))
+			.sum();
+		let (a,b,c) = fixed_dimers.iter()
+			.map(|&pos0| dimer_gradient(pos.sub_v(pos0)))
+			.fold((0.,0.,0.), |a,b| a.add_v(b));
+		grad[0] = a;
+		grad[1] = b;
+		grad[2] = c;
+		pot
+	};
+	
+	let rn = Rn::new(vec![pos.0, pos.1, pos.2]);
+	let m = NonlinearCG::<f64>::new();
+	let rn = try!(m.minimize(&rn, f));
+	Ok((rn[0], rn[1], rn[2]).map(|x| Cart(x)))
+}
+
+/*
+	let (xsq,ysq,zsq) = (x,y,z).map(|x| x*x);
+	let rsq = xsq + ysq + zsq;
+	let r = rsq.sqrt();
+
+	// Spherical polar angle theta = arccos(x / r).
+	// For minima at 0, 60, and 120 we want cos(6 theta)**2
+	// So welcome to this tragedy;
+	let fsq = x*x/rsq;
+	let f = x/r;
+	// cos(6 acos(f))
+	let  cos6acos    =  32.*fsq*fsq*fsq -  48.*fsq*fsq + 18.*fsq - 1;
+	// partial derivative
+	let dcos6acos_df = 192.*fsq*fsq*f   - 192.*fsq*f   + 36.*f;
+	let grad_f = (ysq + zsq, -x*y, -x*z).map(|q| q/(r*rsq))
+
+	let radius_term      = RADIUS_PREFACTOR * rsq;
+	let grad_radius_term = RADIUS_PREFACTOR * 2. * r;
+
+	let theta_term      = THETA_PREFACTOR * cos6acos * cos6acos;
+	let grad_theta_term = 
+	
+	let cos6acos(x*x/rsq)
+	let dcos6acos(x*x/rsq, x/r)
+
+	let angle = (x/r).acos(); // spherical polar angle, where x is the polar axis
+	let cos6  = (6. * angle).cos();
+	let cos6sq = 
+*/
+
 fn dla_run() -> State {
 	let state = State::new(DIMENSION);
 	let state = add_nucleation_site(state);
@@ -264,32 +365,51 @@ fn dla_run() -> State {
 	for n in 0..NPARTICLE {
 		write!(std::io::stderr(), "Particle {:8} of {:8}: ", n, NPARTICLE).unwrap();
 
-		let mut pos = random_border_position(&mut rng);
-		state.init_cursors(pos, nbr_radius);
+		// loop to skip relaxation failures
+		'restart: loop {
 
-		// move until ready to place
-		loop {
-			//writeln!(std::io::stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
-			//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
-			let neighbors = state.neighborhood(pos, nbr_radius);
-			if !neighbors.is_empty() { break }
+			let mut pos = random_border_position(&mut rng);
+			state.init_cursors(pos, nbr_radius);
 
-			let c_dir = random_direction(&mut rng);
-			let c_disp = c_dir.mul_s(MOVE_RADIUS);
-			let f_disp = c_disp.frac(state.dimension);
+			// move until ready to place
+			let mut neighbors;
+			loop {
+				//writeln!(std::io::stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
+				//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
+				neighbors = state.neighborhood(pos, nbr_radius);
+				if !neighbors.is_empty() { break }
 
-			pos = pos.add_v(f_disp);
+				let c_dir = random_direction(&mut rng);
+				let c_disp = c_dir.mul_s(MOVE_RADIUS);
+				let f_disp = c_disp.frac(state.dimension);
+
+				pos = pos.add_v(f_disp);
+				pos = pos.map(|Frac(x)| Frac((x + 1.0).fract()));
+				state.update_cursors(pos, nbr_radius);
+			}
+
+			// Relax the particle.
+			// If relaxation fails, drop it (loudly). So long as this is a rare occurrence,
+			// it should not affect the outcome significantly.
+			let neighbors = neighbors.into_iter().map(|i| state.positions[i]).collect();
+			let relaxed = relax(neighbors, pos.cart(state.dimension));
+			if let Err(err) = relaxed {
+				writeln!(std::io::stderr(), "{:?}", err);
+				continue 'restart;
+			}
+
+			// Place the particle.
+			pos = relaxed.unwrap().frac(state.dimension);
 			pos = pos.map(|Frac(x)| Frac((x + 1.0).fract()));
-			state.update_cursors(pos, nbr_radius);
+			state.insert("C", pos);
+
+			timer.push();
+			writeln!(std::io::stderr(), "({:22},{:22},{:22})  ({:8?} ms)  (avg: {:8?} ms)",
+				(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms()
+			).unwrap();
+
+			break 'restart;
 		}
-
-		// place the particle
-		state.insert("C", pos);
-
-		timer.push();
-		writeln!(std::io::stderr(), "({:22},{:22},{:22})  ({:8?} ms)  (avg: {:8?} ms)",
-			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms()
-		).unwrap();
 	}
 	state
 }
