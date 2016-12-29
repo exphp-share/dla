@@ -1,3 +1,5 @@
+
+// FIXME inconsistent usage of DIMENSION and state.dimension
 const DIMENSION: Trip<Float> = (500., 500., 100.);
 const NPARTICLE: usize = 1500;
 
@@ -18,6 +20,10 @@ extern crate homogenous;
 extern crate itertools;
 #[macro_use]
 extern crate newtype_ops;
+extern crate dla_sys;
+extern crate libc;
+
+mod sp2;
 
 use rand::Rng;
 use rand::distributions::{IndependentSample,Normal};
@@ -26,6 +32,7 @@ use homogenous::numeric::prelude::*;
 use time::precise_time_ns;
 
 use std::io::Write;
+use std::io::stderr;
 
 type Float = f64;
 type Trip<T> = (T,T,T);
@@ -171,6 +178,9 @@ impl State {
 		}).collect()
 	}
 
+	// FIXME I really need to clean up this horriffic API.
+	// (to see what's so horriffic about it, try to consider how cursor_neighborhood
+	//  knows where we are searching)
 	fn neighborhood(&self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
 		let candidates = self.cursor_neighborhood();
 		self.neighborhood_from_candidates(point, radius, candidates)
@@ -295,16 +305,52 @@ fn dimer_gradient((x,y,z): Trip<Float>) -> Trip<Float> {
 	)
 }
 
-//#[link(name="sp2_ifc", kind="static")]
-extern "C" {
-	// FIXME names
-	fn calc_potential (n: isize, a: *mut f64, b: *mut f64, c: *mut f64, d: *mut f64);
-	fn relax_structure(n: isize, a: *mut f64, b: *mut f64, c: *mut f64, d: *mut f64);
-}
-
-
 extern crate ncg_min;
 use ncg_min::{Rn, NonlinearCG, NonlinearCGError};
+
+fn relax(fixed_dimers: Vec<Trip<Cart>>, pos: Trip<Cart>) -> Result<Trip<Cart>, ()> {
+	let fixed_dimers: Vec<_> = fixed_dimers.into_iter().map(|x| x.map(|x| x.0)).collect();
+	let pos = pos.map(|x| x.0);
+
+	let mut posv = sp2::relax(vec![pos], fixed_dimers, DIMENSION);
+	let pos: Trip<f64> = posv.pop().unwrap();
+	assert!(posv.is_empty());
+	Ok(pos.map(|x| Cart(x)))
+}
+
+/*
+fn relax(fixed_dimers: Vec<Trip<Cart>>, pos: Trip<Cart>) -> Result<Trip<Cart>, NonlinearCGError<Rn<Float>>> {
+	let fixed_dimers: Vec<_> = fixed_dimers.into_iter().map(|x| x.map(|x| x.0)).collect();
+	let pos = pos.map(|x| x.0);
+
+	assert!(pos.0 == pos.0);
+	assert!(pos.1 == pos.1);
+	assert!(pos.2 == pos.2);
+
+	writeln!(stderr(), "");
+	writeln!(stderr(), "");
+	writeln!(stderr(), "FIX: {:?}", fixed_dimers.clone());
+	let f = |x: &Rn<Float>, grad: &mut Rn<Float>| {
+		let pos = (x[0], x[1], x[2]);
+
+		// put in box
+		let pos = zip_with!((pos,DIMENSION), |x,d| (x + d) % d);
+		let (pot, (a,b,c)) = sp2::calc_potential(pos, fixed_dimers.clone(), DIMENSION);
+		grad[0] = a;
+		grad[1] = b;
+		grad[2] = c;
+		writeln!(stderr(), "POS: ({:.5},{:.5},{:.5}), GRAD: ({:.5},{:.5},{:.5})", pos.0, pos.1, pos.2, a,b,c);
+		pot
+	};
+
+	let rn = Rn::new(vec![pos.0, pos.1, pos.2]);
+	let m = NonlinearCG::<f64>::new();
+	let rn = try!(m.minimize(&rn, f));
+	Ok((rn[0], rn[1], rn[2]).map(|x| Cart(x)))
+}
+*/
+
+/*
 fn relax(fixed_dimers: Vec<Trip<Cart>>, pos: Trip<Cart>) -> Result<Trip<Cart>, NonlinearCGError<Rn<Float>>> {
 	let fixed_dimers: Vec<_> = fixed_dimers.into_iter().map(|x| x.map(|x| x.0)).collect();
 	let pos = pos.map(|x| x.0);
@@ -328,6 +374,7 @@ fn relax(fixed_dimers: Vec<Trip<Cart>>, pos: Trip<Cart>) -> Result<Trip<Cart>, N
 	let rn = try!(m.minimize(&rn, f));
 	Ok((rn[0], rn[1], rn[2]).map(|x| Cart(x)))
 }
+*/
 
 /*
 	let (xsq,ysq,zsq) = (x,y,z).map(|x| x*x);
@@ -371,7 +418,7 @@ fn dla_run() -> State {
 	let mut timer = Timer::new(30);
 
 	for n in 0..NPARTICLE {
-		write!(std::io::stderr(), "Particle {:8} of {:8}: ", n, NPARTICLE).unwrap();
+		write!(stderr(), "Particle {:8} of {:8}: ", n, NPARTICLE).unwrap();
 
 		// loop to skip relaxation failures
 		'restart: loop {
@@ -382,8 +429,9 @@ fn dla_run() -> State {
 			// move until ready to place
 			let mut neighbors;
 			loop {
-				//writeln!(std::io::stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
+				//writeln!(stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
 				//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
+
 				neighbors = state.neighborhood(pos, nbr_radius);
 				if !neighbors.is_empty() { break }
 
@@ -399,10 +447,11 @@ fn dla_run() -> State {
 			// Relax the particle.
 			// If relaxation fails, drop it (loudly). So long as this is a rare occurrence,
 			// it should not affect the outcome significantly.
-			let neighbors = neighbors.into_iter().map(|i| state.positions[i]).collect();
-			let relaxed = relax(neighbors, pos.cart(state.dimension));
+			//let neighbors = neighbors.into_iter().map(|i| state.positions[i]).collect();
+			//let relaxed = relax(neighbors, pos.cart(state.dimension));
+			let relaxed = relax(state.positions.clone(), pos.cart(state.dimension));
 			if let Err(err) = relaxed {
-				writeln!(std::io::stderr(), "{:?}", err);
+				writeln!(stderr(), "{:?}", err);
 				continue 'restart;
 			}
 
@@ -412,7 +461,7 @@ fn dla_run() -> State {
 			state.insert("C", pos);
 
 			timer.push();
-			writeln!(std::io::stderr(), "({:22},{:22},{:22})  ({:8?} ms)  (avg: {:8?} ms)",
+			writeln!(stderr(), "({:22},{:22},{:22})  ({:8?} ms)  (avg: {:8?} ms)",
 				(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms()
 			).unwrap();
 

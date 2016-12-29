@@ -2,7 +2,7 @@
 name = "dla"
 version = "0.1.0"
 authors = ["Michael Lamparski <diagonaldevice@gmail.com>"]
-#build = "scripts/build.rs"
+#build = "build.rs"
 
 
 [dependencies]
@@ -10,6 +10,7 @@ time = "0.1"
 rand = "0.3"
 itertools = "0.5"
 newtype-ops = "0.1.3"
+libc = "0.2"
 #rustimization = "*"
 
 [dependencies.ncg_min]
@@ -18,5 +19,5 @@ git = "https://github.com/rekka/ncg_min"
 [dependencies.homogenous]
 git = "file:///home/lampam/cpp/other/rust/homogenous"
 
-[dependencies.dla-sys]
+[dependencies.dla_sys]
 git = "file:///home/lampam/asd/class/research/dla-sys"
