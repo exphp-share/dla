@@ -12,6 +12,10 @@ const THETA_STRENGTH: Float = 1.0;
 const RADIUS_STRENGTH: Float = 1.0;
 const TARGET_RADIUS: Float = 1.0;
 
+// could use an enum here but bleh
+const LABEL_SILICON: &'static str = "Si";
+const LABEL_CARBON:  &'static str = "C";
+
 extern crate time;
 extern crate rand;
 #[macro_use(zip_with)]
@@ -27,36 +31,76 @@ mod sp2;
 
 use rand::Rng;
 use rand::distributions::{IndependentSample,Normal};
+use itertools::Itertools;
 use homogenous::prelude::*;
 use homogenous::numeric::prelude::*;
 use time::precise_time_ns;
 
+use std::ops::Range;
 use std::io::Write;
 use std::io::stderr;
 
 type Float = f64;
+type Pair<T> = (T,T);
 type Trip<T> = (T,T,T);
 
+//--------------------
 // For statically proving that fractional/cartesian conversions are handled properly.
 #[derive(Debug,PartialEq,PartialOrd,Copy,Clone)]
-struct Frac(Float);
+pub struct Frac(Float);
 #[derive(Debug,PartialEq,PartialOrd,Copy,Clone)]
-struct Cart(Float);
+pub struct Cart(Float);
 impl Frac { pub fn cart(self, dimension: Float) -> Cart { Cart(self.0*dimension) } }
 impl Cart { pub fn frac(self, dimension: Float) -> Frac { Frac(self.0/dimension) } }
 
 // add common binops to eliminate the majority of reasons I might need to
 // convert back into floats (which would render the type system useless)
-newtype_ops!{ {[Frac][Cart]} arithmetic {:=} {^&}Self {^&}{Self f64} }
+newtype_ops!{ {[Frac][Cart]} arithmetic {:=} {^&}Self {^&}{Self Float} }
 
+// cart() and frac() methods for triples
+trait ToCart { fn cart(self, dimension: Trip<Float>) -> Trip<Cart>; }
+trait ToFrac { fn frac(self, dimension: Trip<Float>) -> Trip<Frac>; }
+impl ToCart for Trip<Frac> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { zip_with!((self,dimension), |x:Frac,d| x.cart(d)) } }
+impl ToFrac for Trip<Cart> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { zip_with!((self,dimension), |x:Cart,d| x.frac(d)) } }
+
+fn reduce_pbc(this: Trip<Frac>) -> Trip<Frac> { this.map(|Frac(x)| Frac((x + 1.0).fract())) }
+
+//--------------------
 // fulfills two needs which BTreeMap fails to satisfy:
 //  * support for PartialOrd
 //  * multiple values may have same key
+// and also has a few oddly-placed bits of logic specific to our application.
 type Key = Frac;
 type Value = usize;
 struct SortedIndices {keys: Vec<Key>, values: Vec<Value>}
 impl SortedIndices {
-	fn new() -> Self { SortedIndices { keys: vec![], values: vec![] } }
+	fn new() -> Self {
+		// specific to our application:
+		//    Keys at the far reaches of outer space help simplify edge cases.
+		//    The corresponding values should never be used.
+		SortedIndices {
+			keys:   vec![Frac(::std::f64::NEG_INFINITY), Frac(::std::f64::INFINITY)],
+			values: vec![0, ::std::usize::MAX],
+		}
+	}
+
+	// initialize with indices into an enumerable sequence
+	fn rebuild<I:IntoIterator<Item=Key>>(iter: I) -> Self {
+		let mut this = SortedIndices::new();
+		for (v,x) in iter.into_iter().enumerate() {
+			this.insert_images(x, v);
+		}
+		this
+	}
+
+	// specific to our application;
+	//    Images one period above and below are stored to simplify edge cases.
+	fn insert_images(&mut self, k: Key, v: Value) {
+		assert!(Frac(0.) <= k && k <= Frac(1.));
+		self.insert(k, v);
+		self.insert(k - Frac(1.), v);
+		self.insert(k + Frac(1.), v);
+	}
 
 	fn insert(&mut self, k: Key, v: Value) {
 		let i = self.lower_bound(k);
@@ -68,28 +112,17 @@ impl SortedIndices {
 			Ok(x) => x, Err(x) => x,
 		}
 	}
-
-	fn upper_bound(&self, k: Key) -> usize {
-		let i = self.lower_bound(k);
-		for i in i+1..self.keys.len() {
-			if self.keys[i] > k { return i; }
-		}
-		return self.keys.len();
-	}
 }
 
-#[derive(Copy,Clone,Debug,Hash,Eq,PartialEq,Ord,PartialOrd)]
-struct Cursor { index: usize }
-impl Cursor {
-	// since we have a good hint, linear search should outperform binary search
-	pub fn update_as_lower(&mut self, set: &SortedIndices, key: Frac) {
-		while key <= set.keys[self.index] { self.index -= 1; }
-		while key >  set.keys[self.index] { self.index += 1; }
-	}
-	pub fn update_as_upper(&mut self, set: &SortedIndices, key: Frac) {
-		while key >= set.keys[self.index] { self.index += 1; }
-		while key <  set.keys[self.index] { self.index -= 1; }
-	}
+fn update_lower_hint(mut hint: usize, sorted: &[Frac], needle: Frac) -> usize {
+	while needle <= sorted[hint] { hint -= 1; }
+	while needle >  sorted[hint] { hint += 1; }
+	hint
+}
+fn update_upper_hint(mut hint: usize, sorted: &[Frac], needle: Frac) -> usize {
+	while needle <  sorted[hint] { hint -= 1; }
+	while needle >= sorted[hint] { hint += 1; }
+	hint
 }
 
 fn intersection(a: Vec<usize>, b: Vec<usize>) -> Vec<usize> {
@@ -98,15 +131,13 @@ fn intersection(a: Vec<usize>, b: Vec<usize>) -> Vec<usize> {
 	a.into_iter().filter(|x| b.iter().any(|y| x == y)).collect()
 }
 
-
+//--------------------------
 struct State {
 	labels: Vec<&'static str>,
 	positions: Vec<Trip<Cart>>,
 	dimension: Trip<Float>,
-	// tracks x - move_radius index on each axis
-	lowers: Trip<Cursor>,
-	// tracks x + move_radius index on each axis
-	uppers: Trip<Cursor>,
+	// tracks x +/- move_radius index on each axis
+	hints: Trip<Range<usize>>,
 	// Contains images in the fractional range [-1, 2] along each axis
 	sorted: Trip<SortedIndices>,
 }
@@ -116,32 +147,19 @@ impl State {
 		State {
 			labels: vec![],
 			positions: vec![],
-			lowers: ((),(),()).map(|_| Cursor { index: 0 }),
-			uppers: ((),(),()).map(|_| Cursor { index: 0 }),
+			hints: ((),(),()).map(|_| 0..0),
 			dimension: dimension,
 			sorted: ((),(),()).map(|_| SortedIndices::new()),
 		}
 	}
 
-	// init with binary search
-	fn init_cursors(&mut self, frac: Trip<Frac>, radius: Cart) {
-		let radii = self.dimension.map(|d| radius.frac(d));
-
-		zip_with!((frac, radii, self.sorted.as_ref(), self.lowers.as_mut(), self.uppers.as_mut()),
-		|x, r, set: &SortedIndices, lower: &mut Cursor, upper: &mut Cursor| { // type inference y u be hatin
-			*lower = Cursor { index: set.lower_bound(x - r) };
-			*upper = Cursor { index: set.upper_bound(x + r) };
-		});
-	}
-
-	// update with linear search
 	fn update_cursors(&mut self, frac: Trip<Frac>, radius: Cart) {
 		let radii = self.dimension.map(|d| radius.frac(d));
 
-		zip_with!((frac, radii, self.sorted.as_ref(), self.lowers.as_mut(), self.uppers.as_mut()),
-		|x,r,set,lower: &mut Cursor,upper: &mut Cursor| {
-			lower.update_as_lower(set, x - r);
-			upper.update_as_upper(set, x + r);
+		zip_with!((frac, radii, self.sorted.as_ref(), self.hints.as_mut()),
+		|x,r,set: &SortedIndices,hints: &mut Range<usize>| {
+			hints.start = update_lower_hint(hints.start, &set.keys, x - r);
+			hints.end   = update_upper_hint(hints.end,   &set.keys, x + r);
 		});
 	}
 
@@ -150,21 +168,45 @@ impl State {
 		self.positions.push(point.cart(self.dimension));
 		self.labels.push(label);
 
-		zip_with!((point, self.sorted.as_mut()), |Frac(x), set: &mut SortedIndices| {
-			assert!(0.0 <= x && x <= 1.0, "{}", x);
-			set.insert(Frac(x), i);
-			set.insert(Frac(x - 1.0), i);
-			set.insert(Frac(x + 1.0), i);
+		zip_with!((point, self.sorted.as_mut()), |x, set: &mut SortedIndices| {
+			set.insert_images(x, i);
 		});
 	}
 
-	fn cursor_neighborhood(&self) -> Vec<usize> {
-		let ranges = zip_with!((self.lowers, self.uppers), |a:Cursor,b:Cursor| a.index..b.index);
+	// returns neighborhood size for debug info
+	fn relax_neighborhood(&mut self, center: Trip<Frac>, radius: Cart) -> usize {
+		let mut fixed = vec![true; self.positions.len()];
+		for i in self.neighborhood(center, radius) {
+			if self.labels[i] != LABEL_SILICON {
+				fixed[i] = false;
+			}
+		}
 
+		let n_free = fixed.iter().filter(|&x| !x).count();
+
+		let State { ref mut positions, ref mut sorted, dimension, .. } = *self;
+
+		*positions = sp2::relax(positions.clone(), fixed, dimension);
+
+		// Relaxation is infrequent; we shall just rebuild the index lists from scratch.
+		sorted.as_mut().enumerate().map(|(axis, set)| {
+			let projected: Vec<_> = positions.iter()
+				.map(|&x| x.frac(dimension))
+				.map(|x| x.into_nth(axis))
+				.collect();
+			*set = SortedIndices::rebuild(projected);
+		});
+
+		n_free
+	}
+
+
+	fn cursor_neighborhood(&self) -> Vec<usize> {
 		// should we even really bother?
-		if ranges.clone().any(|x| x.len() == 0) { return vec![]; }
-		
-		zip_with!((self.sorted.as_ref(), ranges), |set: &SortedIndices, range: ::std::ops::Range<_>| {
+		if self.hints.clone().any(|x| x.len() == 0) { return vec![]; }
+
+		zip_with!((self.sorted.as_ref(), self.hints.clone()),
+		|set: &SortedIndices, range: Range<_>| {
 			set.values[range].to_vec()
 		}).fold1(intersection)
 	}
@@ -178,10 +220,8 @@ impl State {
 		}).collect()
 	}
 
-	// FIXME I really need to clean up this horriffic API.
-	// (to see what's so horriffic about it, try to consider how cursor_neighborhood
-	//  knows where we are searching)
-	fn neighborhood(&self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
+	fn neighborhood(&mut self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
+		self.update_cursors(point, radius);
 		let candidates = self.cursor_neighborhood();
 		self.neighborhood_from_candidates(point, radius, candidates)
 	}
@@ -190,11 +230,6 @@ impl State {
 		self.neighborhood_from_candidates(point, radius, 0..self.positions.len())
 	}
 }
-
-trait ToCart { fn cart(self, dimension: Trip<Float>) -> Trip<Cart>; }
-trait ToFrac { fn frac(self, dimension: Trip<Float>) -> Trip<Frac>; }
-impl ToCart for Trip<Frac> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { zip_with!((self,dimension), |x:Frac,d| x.cart(d)) } }
-impl ToFrac for Trip<Cart> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { zip_with!((self,dimension), |x:Cart,d| x.frac(d)) } }
 
 fn output<W: Write>(state: &State, file: &mut W) {
 	writeln!(file, "[").unwrap();
@@ -238,7 +273,7 @@ fn random_border_position<R:Rng>(rng: &mut R) -> Trip<Frac> {
 fn add_nucleation_site(mut state: State) -> State {
 	let n = (Cart(state.dimension.2) / INTRA_CHAIN_SEP).0.round() as i32;
 	for i in 0i32..n {
-		state.insert("Si", (Frac(0.5), Frac(0.5), Frac(i as Float / n as Float)));
+		state.insert(LABEL_SILICON, (Frac(0.5), Frac(0.5), Frac(i as Float / n as Float)));
 	}
 	state
 }
@@ -264,148 +299,6 @@ impl Timer {
 	}
 }
 
-// A simple interaction potential which tries to encourage honeycomb formation.
-// For a free dimer approaching a fixed dimer, the potential prefers:
-// * Similar dimer orientation.
-// * Distance between centers equal to the unit cell parameter (in the triangular lattice)
-// * Angle between dimer axis and displacement between centers equal to 0, 60, or 120 degrees.
-//
-// The first can be optimized independently of everything else;
-// Simply take all dimers to be oriented along the x axis.
-//
-// Optimizing the center of the dimer is less straight forward because
-// a free dimer may interact with multiple fixed dimers.
-//
-// Each interaction involves r^2 terms and sin(6 theta)^2 terms.
-/*fn dimer_potential((Cart(x),Cart(y),Cart(z)): Trip<Cart>) -> Float {
-	let r = (x*x + y*y + z*z).sqrt();
-	let theta = (x/r).acos();
-
-	let square = |x| x*x;
-	RADIUS_STRENGTH * square(r - TARGET_RADIUS)
-	+ THETA_STRENGTH * square((6.*theta).sin())
-}*/
-
-fn dimer_potential((x,y,z): Trip<Float>) -> Float {
-	let r = (x*x + y*y + z*z).sqrt();
-	let theta = (x/r).acos();
-
-	let square = |x| x*x;
-	RADIUS_STRENGTH * square(r - TARGET_RADIUS)
-	+ THETA_STRENGTH * square((3.*theta).sin())
-}
-
-fn dimer_gradient((x,y,z): Trip<Float>) -> Trip<Float> {
-	let (dx,dy,dz) = DIMENSION.map(|x| x*2f64.powi(-36));
-//	let (dx,dy,dz) = DIMENSION.map(|x| x*2f64.powi(-20));
-	(
-		(dimer_potential((x+dx, y, z)) - dimer_potential((x-dx, y, z)))/(2.*dx),
-		(dimer_potential((x, y+dy, z)) - dimer_potential((x, y-dy, z)))/(2.*dy),
-		(dimer_potential((x, y, z+dz)) - dimer_potential((x, y, z-dz)))/(2.*dz),
-	)
-}
-
-extern crate ncg_min;
-use ncg_min::{Rn, NonlinearCG, NonlinearCGError};
-
-fn relax(fixed_dimers: Vec<Trip<Cart>>, pos: Trip<Cart>) -> Result<Trip<Cart>, ()> {
-	let fixed_dimers: Vec<_> = fixed_dimers.into_iter().map(|x| x.map(|x| x.0)).collect();
-	let pos = pos.map(|x| x.0);
-
-	let mut posv = sp2::relax(vec![pos], fixed_dimers, DIMENSION);
-	let pos: Trip<f64> = posv.pop().unwrap();
-	assert!(posv.is_empty());
-	Ok(pos.map(|x| Cart(x)))
-}
-
-/*
-fn relax(fixed_dimers: Vec<Trip<Cart>>, pos: Trip<Cart>) -> Result<Trip<Cart>, NonlinearCGError<Rn<Float>>> {
-	let fixed_dimers: Vec<_> = fixed_dimers.into_iter().map(|x| x.map(|x| x.0)).collect();
-	let pos = pos.map(|x| x.0);
-
-	assert!(pos.0 == pos.0);
-	assert!(pos.1 == pos.1);
-	assert!(pos.2 == pos.2);
-
-	writeln!(stderr(), "");
-	writeln!(stderr(), "");
-	writeln!(stderr(), "FIX: {:?}", fixed_dimers.clone());
-	let f = |x: &Rn<Float>, grad: &mut Rn<Float>| {
-		let pos = (x[0], x[1], x[2]);
-
-		// put in box
-		let pos = zip_with!((pos,DIMENSION), |x,d| (x + d) % d);
-		let (pot, (a,b,c)) = sp2::calc_potential(pos, fixed_dimers.clone(), DIMENSION);
-		grad[0] = a;
-		grad[1] = b;
-		grad[2] = c;
-		writeln!(stderr(), "POS: ({:.5},{:.5},{:.5}), GRAD: ({:.5},{:.5},{:.5})", pos.0, pos.1, pos.2, a,b,c);
-		pot
-	};
-
-	let rn = Rn::new(vec![pos.0, pos.1, pos.2]);
-	let m = NonlinearCG::<f64>::new();
-	let rn = try!(m.minimize(&rn, f));
-	Ok((rn[0], rn[1], rn[2]).map(|x| Cart(x)))
-}
-*/
-
-/*
-fn relax(fixed_dimers: Vec<Trip<Cart>>, pos: Trip<Cart>) -> Result<Trip<Cart>, NonlinearCGError<Rn<Float>>> {
-	let fixed_dimers: Vec<_> = fixed_dimers.into_iter().map(|x| x.map(|x| x.0)).collect();
-	let pos = pos.map(|x| x.0);
-
-	let f = |x: &Rn<Float>, grad: &mut Rn<Float>| {
-		let pos = (x[0], x[1], x[2]);
-		let pot = fixed_dimers.iter()
-			.map(|&pos0| dimer_potential(pos.sub_v(pos0)))
-			.sum();
-		let (a,b,c) = fixed_dimers.iter()
-			.map(|&pos0| dimer_gradient(pos.sub_v(pos0)))
-			.fold((0.,0.,0.), |a,b| a.add_v(b));
-		grad[0] = a;
-		grad[1] = b;
-		grad[2] = c;
-		pot
-	};
-	
-	let rn = Rn::new(vec![pos.0, pos.1, pos.2]);
-	let m = NonlinearCG::<f64>::new();
-	let rn = try!(m.minimize(&rn, f));
-	Ok((rn[0], rn[1], rn[2]).map(|x| Cart(x)))
-}
-*/
-
-/*
-	let (xsq,ysq,zsq) = (x,y,z).map(|x| x*x);
-	let rsq = xsq + ysq + zsq;
-	let r = rsq.sqrt();
-
-	// Spherical polar angle theta = arccos(x / r).
-	// For minima at 0, 60, and 120 we want cos(6 theta)**2
-	// So welcome to this tragedy;
-	let fsq = x*x/rsq;
-	let f = x/r;
-	// cos(6 acos(f))
-	let  cos6acos    =  32.*fsq*fsq*fsq -  48.*fsq*fsq + 18.*fsq - 1;
-	// partial derivative
-	let dcos6acos_df = 192.*fsq*fsq*f   - 192.*fsq*f   + 36.*f;
-	let grad_f = (ysq + zsq, -x*y, -x*z).map(|q| q/(r*rsq))
-
-	let radius_term      = RADIUS_PREFACTOR * rsq;
-	let grad_radius_term = RADIUS_PREFACTOR * 2. * r;
-
-	let theta_term      = THETA_PREFACTOR * cos6acos * cos6acos;
-	let grad_theta_term = 
-	
-	let cos6acos(x*x/rsq)
-	let dcos6acos(x*x/rsq, x/r)
-
-	let angle = (x/r).acos(); // spherical polar angle, where x is the polar axis
-	let cos6  = (6. * angle).cos();
-	let cos6sq = 
-*/
-
 fn dla_run() -> State {
 	let state = State::new(DIMENSION);
 	let state = add_nucleation_site(state);
@@ -413,7 +306,7 @@ fn dla_run() -> State {
 
 	let mut rng = rand::weak_rng();
 
-	let nbr_radius = Cart(2.)*MOVE_RADIUS + PARTICLE_RADIUS;
+	let nbr_radius = Cart(1.)*MOVE_RADIUS + PARTICLE_RADIUS;
 
 	let mut timer = Timer::new(30);
 
@@ -424,45 +317,26 @@ fn dla_run() -> State {
 		'restart: loop {
 
 			let mut pos = random_border_position(&mut rng);
-			state.init_cursors(pos, nbr_radius);
 
 			// move until ready to place
-			let mut neighbors;
-			loop {
+			while state.neighborhood(pos, nbr_radius).is_empty() {
 				//writeln!(stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
 				//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
 
-				neighbors = state.neighborhood(pos, nbr_radius);
-				if !neighbors.is_empty() { break }
+				let disp = random_direction(&mut rng)
+					.mul_s(MOVE_RADIUS).frac(state.dimension);
 
-				let c_dir = random_direction(&mut rng);
-				let c_disp = c_dir.mul_s(MOVE_RADIUS);
-				let f_disp = c_disp.frac(state.dimension);
-
-				pos = pos.add_v(f_disp);
-				pos = pos.map(|Frac(x)| Frac((x + 1.0).fract()));
-				state.update_cursors(pos, nbr_radius);
-			}
-
-			// Relax the particle.
-			// If relaxation fails, drop it (loudly). So long as this is a rare occurrence,
-			// it should not affect the outcome significantly.
-			//let neighbors = neighbors.into_iter().map(|i| state.positions[i]).collect();
-			//let relaxed = relax(neighbors, pos.cart(state.dimension));
-			let relaxed = relax(state.positions.clone(), pos.cart(state.dimension));
-			if let Err(err) = relaxed {
-				writeln!(stderr(), "{:?}", err);
-				continue 'restart;
+				pos = reduce_pbc(pos.add_v(disp));
 			}
 
 			// Place the particle.
-			pos = relaxed.unwrap().frac(state.dimension);
-			pos = pos.map(|Frac(x)| Frac((x + 1.0).fract()));
-			state.insert("C", pos);
+			state.insert(LABEL_CARBON, pos);
+			let n_free = state.relax_neighborhood(pos, MOVE_RADIUS*3.);
 
+			// debugging info
 			timer.push();
-			writeln!(stderr(), "({:22},{:22},{:22})  ({:8?} ms)  (avg: {:8?} ms)",
-				(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms()
+			writeln!(stderr(), "({:22},{:22},{:22})  ({:8?} ms)  (avg: {:8?} ms)  (relaxed {:8})",
+				(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free
 			).unwrap();
 
 			break 'restart;
