@@ -52,6 +52,11 @@ pub fn calc_potential(free: Trip<f64>, fixed: Vec<Trip<f64>>, dim: Trip<f64>) ->
 	(potential, grad[0])
 }
 
+pub fn relax_all(pos: Vec<Trip<Cart>>, dim: Trip<f64>) -> Vec<Trip<Cart>> {
+	let n = pos.len();
+	relax(pos, vec![false; n], dim)
+}
+
 pub fn relax(pos: Vec<Trip<Cart>>, fixed: Vec<bool>, dim: Trip<f64>) -> Vec<Trip<Cart>> {
 	// NOTE: this brazenly assumes that [(f64,f64,f64); n] and #[repr(C)] [f64; 3*n]
 	//       have the same representation.

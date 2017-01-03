@@ -1,12 +1,22 @@
 
 // FIXME inconsistent usage of DIMENSION and state.dimension
-const DIMENSION: Trip<Float> = (500., 500., 100.);
-const NPARTICLE: usize = 1500;
+const DIMENSION: Trip<Float> = (100., 100., 6.);
+const NPARTICLE: usize = 100;
 
+// VM: * Dimer sep should be 1.4 (Angstrom)
+//     * Interaction radius (to begin relaxation) should be 2
 const CORE_RADIUS: Float = 5.0;
 const INTRA_CHAIN_SEP: Cart = Cart(1.);
-const PARTICLE_RADIUS: Cart = Cart(1.);
+const PARTICLE_RADIUS: Cart = Cart(1.);//Cart(0.4);
 const MOVE_RADIUS: Cart = Cart(1.);
+const DIMER_INITIAL_SEP: Cart = Cart(1.4);
+const HEX_INITIAL_RADIUS: Cart = Cart(0.5);
+const RELAX_FREE_RADIUS: Cart = Cart(10.);
+const RELAX_NEIGHBORHOOD_FACTOR: f64 = 10.;
+
+const CART_ORIGIN: Trip<Cart> = (Cart(0.), Cart(0.), Cart(0.));
+const FRAC_ORIGIN: Trip<Frac> = (Frac(0.), Frac(0.), Frac(0.));
+const ORIGIN: Trip<Float> = (0., 0., 0.);
 
 const THETA_STRENGTH: Float = 1.0;
 const RADIUS_STRENGTH: Float = 1.0;
@@ -40,6 +50,8 @@ use std::ops::Range;
 use std::io::Write;
 use std::io::stderr;
 
+use std::f64::consts::PI;
+
 type Float = f64;
 type Pair<T> = (T,T);
 type Trip<T> = (T,T,T);
@@ -62,6 +74,8 @@ trait ToCart { fn cart(self, dimension: Trip<Float>) -> Trip<Cart>; }
 trait ToFrac { fn frac(self, dimension: Trip<Float>) -> Trip<Frac>; }
 impl ToCart for Trip<Frac> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { zip_with!((self,dimension), |x:Frac,d| x.cart(d)) } }
 impl ToFrac for Trip<Cart> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { zip_with!((self,dimension), |x:Cart,d| x.frac(d)) } }
+impl ToCart for Trip<Cart> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { self } }
+impl ToFrac for Trip<Frac> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { self } }
 
 fn reduce_pbc(this: Trip<Frac>) -> Trip<Frac> { this.map(|Frac(x)| Frac((x + 1.0).fract())) }
 
@@ -96,7 +110,7 @@ impl SortedIndices {
 	// specific to our application;
 	//    Images one period above and below are stored to simplify edge cases.
 	fn insert_images(&mut self, k: Key, v: Value) {
-		assert!(Frac(0.) <= k && k <= Frac(1.));
+		assert!(Frac(0.) <= k && k <= Frac(1.), "{:?}", k);
 		self.insert(k, v);
 		self.insert(k - Frac(1.), v);
 		self.insert(k + Frac(1.), v);
@@ -153,6 +167,14 @@ impl State {
 		}
 	}
 
+	fn from_sites<P:ToFrac,I:IntoIterator<Item=P>>(dimension: Trip<f64>, pos: I) -> State {
+		let mut this = State::new(dimension);
+		for x in pos {
+			this.insert(LABEL_SILICON, reduce_pbc(x.frac(dimension)));
+		}
+		this
+	}
+
 	fn update_cursors(&mut self, frac: Trip<Frac>, radius: Cart) {
 		let radii = self.dimension.map(|d| radius.frac(d));
 
@@ -186,12 +208,12 @@ impl State {
 
 		let State { ref mut positions, ref mut sorted, dimension, .. } = *self;
 
-		*positions = sp2::relax(positions.clone(), fixed, dimension);
+		*positions = sp2::relax(positions.clone(), fixed, (0.,0.,0.));// dimension); // FIXME
 
 		// Relaxation is infrequent; we shall just rebuild the index lists from scratch.
 		sorted.as_mut().enumerate().map(|(axis, set)| {
 			let projected: Vec<_> = positions.iter()
-				.map(|&x| x.frac(dimension))
+				.map(|&x| reduce_pbc(x.frac(dimension)))
 				.map(|x| x.into_nth(axis))
 				.collect();
 			*set = SortedIndices::rebuild(projected);
@@ -199,7 +221,6 @@ impl State {
 
 		n_free
 	}
-
 
 	fn cursor_neighborhood(&self) -> Vec<usize> {
 		// should we even really bother?
@@ -270,13 +291,90 @@ fn random_border_position<R:Rng>(rng: &mut R) -> Trip<Frac> {
 	}
 }
 
-fn add_nucleation_site(mut state: State) -> State {
-	let n = (Cart(state.dimension.2) / INTRA_CHAIN_SEP).0.round() as i32;
+fn chain_nucleus(dimension: Trip<f64>) -> State {
+	let mut state = State::new(dimension);
+	let n = (Cart(dimension.2) / INTRA_CHAIN_SEP).0.round() as i32;
 	for i in 0i32..n {
 		state.insert(LABEL_SILICON, (Frac(0.5), Frac(0.5), Frac(i as Float / n as Float)));
 	}
 	state
 }
+
+fn rotate((Cart(x),Cart(y)): (Cart,Cart), angle: Float) -> (Cart,Cart) {
+	let (sin,cos) = (angle.sin(), angle.cos());
+	(Cart(cos * x - sin * y), Cart(cos * y + sin * x))
+}
+
+fn hexagon_sites(dimension: Trip<f64>) -> Vec<Trip<Cart>> {
+	let pos =
+		::itertools::iterate((Cart(0.), HEX_INITIAL_RADIUS), |&p| rotate(p, PI/3.))
+		.map(|(x,y)| (x,y,Cart(0.)))
+		.take(6).collect_vec();
+
+	// optimize bond length
+	let pos = sp2::relax_all(pos, (0.,0.,0.));
+	recenter_origin(pos, dimension)
+}
+
+fn hexagon_nucleus(dimension: Trip<f64>) -> State {
+	State::from_sites(dimension, hexagon_sites(dimension))
+}
+
+fn remove_overlapping(mut vec: Vec<Trip<Cart>>, threshold: Cart) -> Vec<Trip<Cart>> {
+	let mut i = 0;
+	loop {
+		if i >= vec.len() { break; }
+		let bad = (&vec[0..i]).iter().any(|&q| vec[i].sub_v(q).sqnorm() < threshold*threshold);
+
+		if bad { vec.swap_remove(i); }
+		else { i += 1; }
+	}
+	vec
+}
+
+fn center(pos: &Vec<Trip<Cart>>) -> Trip<Cart> {
+	let n = Cart(pos.len() as Float);
+	pos.iter().fold(CART_ORIGIN, |u,&b| u.add_v(b)).div_s(n)
+}
+
+// FIXME poor abstraction (reduce_pbc or no?)
+fn recenter_origin(pos: Vec<Trip<Cart>>, dimension: Trip<f64>) -> Vec<Trip<Cart>> {
+	let center = center(&pos);
+	pos.into_iter().map(|x|
+		x.sub_v(center).frac(dimension).cart(dimension)
+	).collect()
+}
+fn recenter_midpoint(pos: Vec<Trip<Cart>>, dimension: Trip<f64>) -> Vec<Trip<Cart>> {
+	let center = center(&pos);
+	pos.into_iter().map(|x|
+		reduce_pbc(x.sub_v(center).frac(dimension).add_s(Frac(0.5))).cart(dimension)
+	).collect()
+}
+
+fn seven_hexagon_nucleus(dimension: Trip<f64>) -> State {
+	let mut pos = hexagon_sites(dimension);
+	pos.sort_by(|&(x,y,_), &(x2,y2,_)| (y.0.atan2(x.0)).partial_cmp(&y2.0.atan2(x2.0)).unwrap());
+
+	let hex_disps = pos.iter().cloned()
+		.cycle().tuple_windows::<(_,_)>().take(6)
+		.map(|(v1,v2)| v1.add_v(v2)).collect_vec();
+
+	for p in ::std::mem::replace(&mut pos, vec![])  {
+		for &d in &hex_disps {
+			pos.push(p.add_v(d));
+		}
+	}
+
+	let pos = remove_overlapping(pos, Cart(1e-4));
+	let pos = recenter_midpoint(pos, dimension);
+	let pos = sp2::relax_all(pos, (0.,0.,0.));
+	let pos = remove_overlapping(pos, Cart(1e-4));
+	let pos = sp2::relax_all(pos, (0.,0.,0.));
+	assert_eq!(pos.len(), 24);
+	State::from_sites(dimension, pos)
+}
+
+
 
 use std::collections::vec_deque::VecDeque;
 struct Timer { deque: VecDeque<u64> }
@@ -300,9 +398,7 @@ impl Timer {
 }
 
 fn dla_run() -> State {
-	let state = State::new(DIMENSION);
-	let state = add_nucleation_site(state);
-	let mut state = state;
+	let mut state = seven_hexagon_nucleus(DIMENSION);
 
 	let mut rng = rand::weak_rng();
 
@@ -315,7 +411,6 @@ fn dla_run() -> State {
 
 		// loop to skip relaxation failures
 		'restart: loop {
-
 			let mut pos = random_border_position(&mut rng);
 
 			// move until ready to place
@@ -329,9 +424,18 @@ fn dla_run() -> State {
 				pos = reduce_pbc(pos.add_v(disp));
 			}
 
+			// Egads! The particle was actually a dimer all along!
+			let sites = {
+				let disp = random_direction(&mut rng).mul_s(DIMER_INITIAL_SEP * 0.5);
+				let disp = disp.frac(state.dimension);
+				(reduce_pbc(pos.add_v(disp)), reduce_pbc(pos.sub_v(disp)))
+			};
+
 			// Place the particle.
-			state.insert(LABEL_CARBON, pos);
-			let n_free = state.relax_neighborhood(pos, MOVE_RADIUS*3.);
+			for pos in sites.into_iter() {
+				state.insert(LABEL_CARBON, pos);
+			}
+			let n_free = state.relax_neighborhood(pos, RELAX_FREE_RADIUS);
 
 			// debugging info
 			timer.push();
