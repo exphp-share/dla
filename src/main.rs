@@ -48,7 +48,7 @@ use time::precise_time_ns;
 
 use std::ops::Range;
 use std::io::Write;
-use std::io::stderr;
+use std::io::{stderr,stdout};
 
 use std::f64::consts::PI;
 
@@ -110,6 +110,7 @@ impl SortedIndices {
 	// specific to our application;
 	//    Images one period above and below are stored to simplify edge cases.
 	fn insert_images(&mut self, k: Key, v: Value) {
+		let k = Frac((k.0 + 1.).fract()); // FIXME HACK
 		assert!(Frac(0.) <= k && k <= Frac(1.), "{:?}", k);
 		self.insert(k, v);
 		self.insert(k - Frac(1.), v);
@@ -222,6 +223,18 @@ impl State {
 		n_free
 	}
 
+	fn extend_and_relax<P:ToFrac,I:IntoIterator<Item=P>>(&mut self, iter: I) {
+		let mut fixed = vec![true; self.positions.len()];
+		for p in iter {
+			let dim = self.dimension;
+			self.insert(LABEL_CARBON, reduce_pbc(p.frac(dim)))
+		}
+		fixed.resize(self.positions.len(), false);
+
+		let tmp = self.positions.clone();
+		self.positions = sp2::relax(tmp, fixed, (0.,0.,self.dimension.2));
+	}
+
 	fn cursor_neighborhood(&self) -> Vec<usize> {
 		// should we even really bother?
 		if self.hints.clone().any(|x| x.len() == 0) { return vec![]; }
@@ -235,6 +248,7 @@ impl State {
 	fn neighborhood_from_candidates<I: IntoIterator<Item=usize>>(&self, frac: Trip<Frac>, radius: Cart, indices: I) -> Vec<usize> {
 		let cart = frac.cart(self.dimension);
 
+		// FIXME ignores nearest images. how on earth did I not notice this
 		indices.into_iter().filter(|&i| {
 			let displacement = cart.sub_v(self.positions[i]);
 			displacement.sqnorm() <= radius*radius
@@ -261,6 +275,20 @@ fn output<W: Write>(state: &State, file: &mut W) {
 		first = false;
 	}
 	writeln!(file, "]").unwrap();
+}
+
+fn write_xyz<W: Write>(state: &State, file: &mut W, final_length: usize) {
+	let mut lab = state.labels.clone();
+	let mut pos = state.positions.clone();
+	let first = *pos.first().unwrap();
+
+	lab.resize(final_length, LABEL_CARBON);
+	pos.resize(final_length, first);
+	writeln!(file, "{}", final_length);
+	writeln!(file, "blah blah blah");
+	for (&label, &(Cart(x),Cart(y),Cart(z))) in lab.iter().zip(&pos) {
+		writeln!(file, "{} {} {} {}", label, x, y, z);
+	}
 }
 
 //---------- DLA
@@ -406,6 +434,7 @@ fn dla_run() -> State {
 
 	let mut timer = Timer::new(30);
 
+	let final_particles = 2*NPARTICLE + state.positions.len();
 	for n in 0..NPARTICLE {
 		write!(stderr(), "Particle {:8} of {:8}: ", n, NPARTICLE).unwrap();
 
@@ -424,18 +453,21 @@ fn dla_run() -> State {
 				pos = reduce_pbc(pos.add_v(disp));
 			}
 
-			// Egads! The particle was actually a dimer all along!
+			// Egads! The particle was actually a dimer^H^H^H^H^Htrimer all along!
 			let sites = {
-				let disp = random_direction(&mut rng).mul_s(DIMER_INITIAL_SEP * 0.5);
-				let disp = disp.frac(state.dimension);
-				(reduce_pbc(pos.add_v(disp)), reduce_pbc(pos.sub_v(disp)))
+//				let disp = random_direction(&mut rng).mul_s(DIMER_INITIAL_SEP * 0.5);
+//				let disp = disp.frac(state.dimension);
+//				(reduce_pbc(pos.add_v(disp)), reduce_pbc(pos.sub_v(disp)))
+				((),(),).map(|_|
+					pos.add_v(random_direction(&mut rng).mul_s(DIMER_INITIAL_SEP * 0.5).frac(state.dimension))
+				)
 			};
 
 			// Place the particle.
-			for pos in sites.into_iter() {
-				state.insert(LABEL_CARBON, pos);
-			}
-			let n_free = state.relax_neighborhood(pos, RELAX_FREE_RADIUS);
+			//state.extend_and_relax(sites.into_iter());
+			//state.extend_and_relax(sites.into_iter());
+			for p in sites.into_iter() { state.insert(LABEL_CARBON, p) }
+			let n_free = state.relax_neighborhood(pos, Cart(5.));
 
 			// debugging info
 			timer.push();
@@ -445,11 +477,13 @@ fn dla_run() -> State {
 
 			break 'restart;
 		}
+
+		write_xyz(&state, &mut stdout(), final_particles);
 	}
+	assert_eq!(final_particles, state.positions.len());
 	state
 }
 
 fn main() {
 	let state = dla_run();
-	output(&state, &mut std::io::stdout());
 }
