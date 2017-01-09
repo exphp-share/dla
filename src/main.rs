@@ -72,12 +72,22 @@ newtype_ops!{ {[Frac][Cart]} arithmetic {:=} {^&}Self {^&}{Self Float} }
 // cart() and frac() methods for triples
 trait ToCart { fn cart(self, dimension: Trip<Float>) -> Trip<Cart>; }
 trait ToFrac { fn frac(self, dimension: Trip<Float>) -> Trip<Frac>; }
-impl ToCart for Trip<Frac> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { zip_with!((self,dimension), |x:Frac,d| x.cart(d)) } }
-impl ToFrac for Trip<Cart> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { zip_with!((self,dimension), |x:Cart,d| x.frac(d)) } }
+impl ToCart for Trip<Frac> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { zip_with!((self,dimension) |x,d| x.cart(d)) } }
+impl ToFrac for Trip<Cart> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { zip_with!((self,dimension) |x,d| x.frac(d)) } }
 impl ToCart for Trip<Cart> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { self } }
 impl ToFrac for Trip<Frac> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { self } }
 
-fn reduce_pbc(this: Trip<Frac>) -> Trip<Frac> { this.map(|Frac(x)| Frac((x + 1.0).fract())) }
+fn reduce_pbc(this: Trip<Frac>) -> Trip<Frac> { this.map(|Frac(x)| Frac((x.fract() + 1.0).fract())) }
+fn nearest_image_dist_sq<P:ToFrac,Q:ToFrac>(this: P, that: Q, dimension: Trip<Float>) -> Cart {
+	// assumes a diagonal cell
+	let this = this.frac(dimension);
+	let that = that.frac(dimension);
+	let fdiff = reduce_pbc(this.sub_v(that)); // range [0, 1.]
+	let fdiff = fdiff.map(|Frac(x)| Frac(x.min(1. - x))); // range [0, 0.5]
+
+	fdiff.map(|Frac(x)| assert!(0. <= x && x <= 0.5, "{} {:?} {:?}", x, this.map(|x| x.0), that.map(|x| x.0)));
+	fdiff.cart(dimension).sqnorm()
+}
 
 //--------------------
 // fulfills two needs which BTreeMap fails to satisfy:
@@ -140,12 +150,6 @@ fn update_upper_hint(mut hint: usize, sorted: &[Frac], needle: Frac) -> usize {
 	hint
 }
 
-fn intersection(a: Vec<usize>, b: Vec<usize>) -> Vec<usize> {
-	// hm, can't find anything on cargo. Itertools only has unions (merge).
-	// we'll do O(m*n) because the sets are almost always expected to be size 0.
-	a.into_iter().filter(|x| b.iter().any(|y| x == y)).collect()
-}
-
 //--------------------------
 struct State {
 	labels: Vec<&'static str>,
@@ -179,21 +183,20 @@ impl State {
 	fn update_cursors(&mut self, frac: Trip<Frac>, radius: Cart) {
 		let radii = self.dimension.map(|d| radius.frac(d));
 
-		zip_with!((frac, radii, self.sorted.as_ref(), self.hints.as_mut()),
-		|x,r,set: &SortedIndices,hints: &mut Range<usize>| {
+		zip_with!((frac, radii, self.sorted.as_ref(), self.hints.as_mut())
+		|x,r,set,hints| {
 			hints.start = update_lower_hint(hints.start, &set.keys, x - r);
 			hints.end   = update_upper_hint(hints.end,   &set.keys, x + r);
 		});
 	}
 
 	fn insert(&mut self, label: &'static str, point: Trip<Frac>) {
+		let point = reduce_pbc(point);
 		let i = self.positions.len();
 		self.positions.push(point.cart(self.dimension));
 		self.labels.push(label);
 
-		zip_with!((point, self.sorted.as_mut()), |x, set: &mut SortedIndices| {
-			set.insert_images(x, i);
-		});
+		zip_with!((point, self.sorted.as_mut()) |x, set| set.insert_images(x, i));
 	}
 
 	// returns neighborhood size for debug info
@@ -239,19 +242,16 @@ impl State {
 		// should we even really bother?
 		if self.hints.clone().any(|x| x.len() == 0) { return vec![]; }
 
-		zip_with!((self.sorted.as_ref(), self.hints.clone()),
-		|set: &SortedIndices, range: Range<_>| {
-			set.values[range].to_vec()
-		}).fold1(intersection)
+		zip_with!((self.sorted.as_ref(), self.hints.clone())
+			|set, range| { set.values[range].to_vec() }
+		).fold1(|a, b| a.into_iter().filter(|x| b.iter().any(|y| x == y)).collect())
 	}
 
 	fn neighborhood_from_candidates<I: IntoIterator<Item=usize>>(&self, frac: Trip<Frac>, radius: Cart, indices: I) -> Vec<usize> {
 		let cart = frac.cart(self.dimension);
 
-		// FIXME ignores nearest images. how on earth did I not notice this
 		indices.into_iter().filter(|&i| {
-			let displacement = cart.sub_v(self.positions[i]);
-			displacement.sqnorm() <= radius*radius
+			nearest_image_dist_sq(cart, self.positions[i], self.dimension) <= radius*radius
 		}).collect()
 	}
 
@@ -345,7 +345,7 @@ fn hexagon_sites(dimension: Trip<f64>) -> Vec<Trip<Cart>> {
 }
 
 fn hexagon_nucleus(dimension: Trip<f64>) -> State {
-	State::from_sites(dimension, hexagon_sites(dimension))
+	State::from_sites(dimension, recenter_midpoint(hexagon_sites(dimension), dimension))
 }
 
 fn remove_overlapping(mut vec: Vec<Trip<Cart>>, threshold: Cart) -> Vec<Trip<Cart>> {
@@ -426,7 +426,7 @@ impl Timer {
 }
 
 fn dla_run() -> State {
-	let mut state = seven_hexagon_nucleus(DIMENSION);
+	let mut state = hexagon_nucleus(DIMENSION);
 
 	let mut rng = rand::weak_rng();
 
@@ -459,7 +459,7 @@ fn dla_run() -> State {
 //				let disp = disp.frac(state.dimension);
 //				(reduce_pbc(pos.add_v(disp)), reduce_pbc(pos.sub_v(disp)))
 				((),(),).map(|_|
-					pos.add_v(random_direction(&mut rng).mul_s(DIMER_INITIAL_SEP * 0.5).frac(state.dimension))
+					reduce_pbc(pos.add_v(random_direction(&mut rng).mul_s(DIMER_INITIAL_SEP * 0.5).frac(state.dimension)))
 				)
 			};
 
@@ -485,5 +485,5 @@ fn dla_run() -> State {
 }
 
 fn main() {
-	let state = dla_run();
+	dla_run();
 }
