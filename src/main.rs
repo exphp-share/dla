@@ -46,7 +46,7 @@ use homogenous::prelude::*;
 use homogenous::numeric::prelude::*;
 use time::precise_time_ns;
 use nalgebra as na;
-use nalgebra::{Rotation as NaRotation, Translation as NaTranslation};
+use nalgebra::{Rotation as NaRotation, Translation as NaTranslation, Transformation as NaTransformation};
 
 use std::ops::Range;
 use std::io::Write;
@@ -58,9 +58,14 @@ type Float = f64;
 type Pair<T> = (T,T);
 type Trip<T> = (T,T,T);
 
-type NaIso = na::Mat3<Float>;
+type NaIso = na::Isometry3<Float>;
 type NaVector3 = na::Vector3<Float>;
 type NaPoint3 = na::Point3<Float>;
+
+fn identity() -> NaIso { NaIso::new(na::zero(), na::zero()) }
+fn na_x(r: Float) -> NaVector3 { na::Vector3{x:r, ..na::zero()} }
+fn na_y(r: Float) -> NaVector3 { na::Vector3{y:r, ..na::zero()} }
+fn na_z(r: Float) -> NaVector3 { na::Vector3{z:r, ..na::zero()} }
 
 // could use an enum but meh
 type Label = &'static str;
@@ -76,10 +81,9 @@ struct Tree {
 	parents: Vec<Option<usize>>,
 }
 
-fn identity_iso() -> NaIso { NaIso::new(na::zero(), na::zero()) }
 
 impl Tree {
-	fn from_two(Cart(length): Cart, labels: (Label,Label)) -> Self {
+	fn from_two(Cart(cart): Cart, labels: (Label,Label)) -> Self {
 		// Begins with two atoms; one at the origin and one at (length, 0., 0.).
 
 		// Beginning with two atoms allows us to define a root node easily;
@@ -88,14 +92,14 @@ impl Tree {
 		//   (hence both represent the same bond, but there's no parent cycle)
 
 		// at origin, let x point away from atom 2
-		let iso_1 = NaIso::new(na::zero(), na::Vector3 { y: 180f64.to_radians(), ..na::zero() });
+		let iso_1 = identity().append_rotation(&na_z(180f64.to_radians()));
 		// at atom 2, let x point away from origin
-		let iso_2 = NaIso::new(na::Vector3 { x: length, ..na::zero() }, na::zero());
+		let iso_2 = identity().append_translation(&na_x(cart));
 		Tree {
 //			classes: vec![Class::Ghost, classes.1, classes.0],
 //			isos:    vec![identity_iso(), iso_2, iso_1],
 //			parents: vec![None, Some(0), Some(1)],
-			labels: vec![labels.0, labels.1],
+			labels:  vec![labels.0, labels.1],
 			isos:    vec![iso_1, iso_2],
 			parents: vec![None, Some(0)],
 		}
@@ -103,23 +107,20 @@ impl Tree {
 
 	fn len(&self) -> usize { self.labels.len() }
 
-	// mutators simply to contain all the junk relating to nalgebra
-	fn translate_mut(&mut self, t: Trip<Cart>) {
-		for iso in &mut self.isos { iso.append_translation_mut(&to_na_vector(t)); }
-	}
-	fn rotate_z_mut(&mut self, r: f64) {
-		for iso in &mut self.isos { iso.append_rotation_mut(&na::Vector3 { z: r, ..na::zero() }); }
+	fn transform_mut(&mut self, iso: NaIso) {
+		for x in &mut self.isos { x.append_transformation_mut(&iso) }
 	}
 
-	fn attach_new(&mut self, parent: usize, label: Label, Cart(length): Cart, beta: f64) -> usize {
+	fn attach_new(&mut self, parent: usize, label: Label, Cart(cart): Cart, beta: f64) -> usize {
 		assert!(parent < self.len());
 
-		// NOTE: nalgebra's "append/prepend" are defined in chronological terms;
-		// The appended operation is performed last. (it is the first matrix when read ltr)
-		let iso = self.isos[parent]
-			.append_translation(&na::Vector3 { x: length, ..na::zero() })
-			.append_rotation(&na::Vector3 { y: 60f64.to_radians(), ..na::zero() })
-			.append_rotation(&na::Vector3 { x: beta, ..na::zero() })
+		// NOTE: a.append_something(b) is defined to apply b after a, *chronologically* speaking.
+		// (i.e. reading the matrices right-to-left, assuming they operate on column vectors)
+		let iso = identity()
+			.append_translation(&na_x(cart))
+			.append_rotation(&na_y(60f64.to_radians()))
+			.append_rotation(&na_x(beta))
+			.append_transformation(&self.isos[parent])
 			;
 
 		self.parents.push(Some(parent));
@@ -399,12 +400,27 @@ fn rotate((Cart(x),Cart(y)): (Cart,Cart), angle: Float) -> (Cart,Cart) {
 	(Cart(cos * x - sin * y), Cart(cos * y + sin * x))
 }
 
+// for debugging the isometries; this should be a barbell shape, with
+// 4 atoms protruding from each end in 4 diagonal directions
+fn barbell_nucleus(dimension: Trip<f64>) -> Tree {
+	let mut tree = Tree::from_two(DIMER_INITIAL_SEP, ("Si", "C"));
+	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*0.0);
+	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*0.5);
+	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*1.0);
+	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*1.5);
+	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*0.0);
+	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*0.5);
+	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*1.0);
+	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*1.5);
+	tree
+}
+
 fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	let mut tree = Tree::from_two(DIMER_INITIAL_SEP, (LABEL_SILICON, LABEL_SILICON));
-	let i = tree.attach_new(0, LABEL_SILICON, DIMER_INITIAL_SEP, PI/2.);
-	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI/2.);
-	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI/2.);
-	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI/2.);
+	let i = tree.attach_new(1, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
+	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
+	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
+	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
 //	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI/2.);
 //	let i = tree.attach_new(1, LABEL_SILICON, DIMER_INITIAL_SEP, -PI/2.);
 //	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, -PI/2.);
