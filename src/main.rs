@@ -1,4 +1,6 @@
 
+#![feature(iter_min_by)]
+
 // FIXME inconsistent usage of DIMENSION and state.dimension
 const DIMENSION: Trip<Float> = (100., 100., 6.);
 const NPARTICLE: usize = 100;
@@ -123,10 +125,57 @@ impl Tree {
 			.append_transformation(&self.isos[parent])
 			;
 
+//		// NOTE: This should be equivalent to the next four lines. (check with squiggle_core)
+//		self.attach_at(parent, label, from_na_vector(iso.translation))
+
 		self.parents.push(Some(parent));
 		self.isos.push(iso);
 		self.labels.push(label);
 		self.isos.len()-1
+	}
+
+	fn attach_at(&mut self, parent: usize, label: Label, point: Trip<Cart>) -> usize {
+		assert!(parent < self.len());
+
+		// this method is disgusting
+		// the goal is to produce take an arbitrary point and break it down into the
+		// parameterization that attach_new uses.
+
+		// the implementation... is the result of pure trial and error.
+		let (x,y,z) = point.map(|x| x.0);
+		let na::Point3 {x,y,z} = self.isos[parent].inverse_transformation() * na::Point3 { x:x, y:y, z:z };
+
+		let beta = y.atan2(-z);
+		let na::Point3 {x,y,z} = identity().append_rotation(&na_x(-beta)) * na::Point3 { x:x, y:y, z:z };
+		assert!(y.abs() < 1e-5, "{}", z);
+
+		let alpha = (-z).atan2(x);
+		let na::Point3 {x,y,z} = identity().append_rotation(&na_y(-alpha)) * na::Point3 { x:x, y:y, z:z };
+		assert!(z.abs() < 1e-5, "{}", x);
+
+		let t = x;
+
+		writeln!(stderr(), " ALPHA {} BETA {} ", alpha.to_degrees(), beta.to_degrees());
+		let iso = identity()
+			.append_translation(&na_x(t))
+			.append_rotation(&na_y(alpha))
+			.append_rotation(&na_x(beta))
+			.append_transformation(&self.isos[parent])
+			;
+
+		self.parents.push(Some(parent));
+		self.isos.push(iso);
+		self.labels.push(label);
+		self.isos.len()-1
+	}
+
+	// FIXME hack
+	fn pop(&mut self) -> Option<(Label, Option<usize>, Trip<Cart>)> {
+		self.labels.pop().map(|label| {
+			let parent = self.parents.pop().unwrap();
+			let pos = from_na_vector(self.isos.pop().unwrap().translation);
+			(label, parent, pos)
+		})
 	}
 
 	fn positions(&self) -> Vec<Trip<Cart>> {
@@ -334,11 +383,18 @@ impl State {
 		).fold1(|a, b| a.into_iter().filter(|x| b.iter().any(|y| x == y)).collect())
 	}
 
-	fn neighborhood_from_candidates<I: IntoIterator<Item=usize>>(&self, frac: Trip<Frac>, radius: Cart, indices: I) -> Vec<usize> {
-		let cart = frac.cart(self.dimension);
+	fn closest_neighbor(&mut self, point: Trip<Frac>, radius: Cart) -> Option<usize> {
+		let indices = self.neighborhood(point, radius);
+		indices.into_iter()
+			.map(|i| (Some(i), nearest_image_dist_sq(point, self.positions[i], self.dimension)))
+			// locate tuple with minimum distance; unfortunately, Iterator::min_by is unstable.
+			.fold((None,Cart(std::f64::MAX)), |(i,p),(k,q)| if p < q { (i,p) } else { (k,q) })
+			.0
+	}
 
+	fn neighborhood_from_candidates<I: IntoIterator<Item=usize>>(&self, point: Trip<Frac>, radius: Cart, indices: I) -> Vec<usize> {
 		indices.into_iter().filter(|&i| {
-			nearest_image_dist_sq(cart, self.positions[i], self.dimension) <= radius*radius
+			nearest_image_dist_sq(point, self.positions[i], self.dimension) <= radius*radius
 		}).collect()
 	}
 
@@ -415,16 +471,29 @@ fn barbell_nucleus(dimension: Trip<f64>) -> Tree {
 	tree
 }
 
+// for debugging reattachment;
+fn squiggle_nucleus(dimension: Trip<f64>) -> Tree {
+	let mut tree = Tree::from_two(DIMER_INITIAL_SEP, ("Si", "Si"));
+	let mut i = 0;
+	for k in 0..16 {
+		i = tree.attach_new(i, "Si", DIMER_INITIAL_SEP, PI*(k as f64)/(16 as f64));
+	}
+	// test on the "ghost" nucleus
+	let mut i = 1;
+	for k in 0..16 {
+		i = tree.attach_new(i, "Si", DIMER_INITIAL_SEP, PI*(k as f64)/(16 as f64));
+	}
+	tree
+}
+
 fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	let mut tree = Tree::from_two(DIMER_INITIAL_SEP, (LABEL_SILICON, LABEL_SILICON));
 	let i = tree.attach_new(1, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
 	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
 	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
 	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
-//	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI/2.);
-//	let i = tree.attach_new(1, LABEL_SILICON, DIMER_INITIAL_SEP, -PI/2.);
-//	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, -PI/2.);
 
+	// FIXME uncomment
 	// optimize bond length
 	//let pos = sp2::relax_all(pos, (0.,0.,0.));
 	tree
@@ -485,7 +554,7 @@ impl Timer {
 }
 
 fn dla_run() -> Tree {
-	let mut tree = hexagon_nucleus(DIMENSION);
+	let mut tree = squiggle_nucleus(DIMENSION);
 
 	let mut rng = rand::weak_rng();
 
@@ -494,53 +563,62 @@ fn dla_run() -> Tree {
 	let mut timer = Timer::new(30);
 
 	let final_particles = 2*NPARTICLE + tree.len();
-	for n in 0..NPARTICLE {
+
 /*
+	for n in 0..NPARTICLE {
 		write!(stderr(), "Particle {:8} of {:8}: ", n, NPARTICLE).unwrap();
 
-		// loop to skip relaxation failures
-		'restart: loop {
-			let mut pos = random_border_position(&mut rng);
+		let mut state = State::from_positions(DIMENSION, tree.positions().into_iter().zip(tree.labels.clone()));
 
-			// move until ready to place
-			while state.neighborhood(pos, nbr_radius).is_empty() {
-				//writeln!(stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
-				//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
+		let mut pos = random_border_position(&mut rng);
 
-				let disp = random_direction(&mut rng)
-					.mul_s(MOVE_RADIUS).frac(state.dimension);
+		// move until ready to place
+		while state.neighborhood(pos, nbr_radius).is_empty() {
+			//writeln!(stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
+			//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
 
-				pos = reduce_pbc(pos.add_v(disp));
-			}
+			let disp = random_direction(&mut rng)
+				.mul_s(MOVE_RADIUS).frac(state.dimension);
 
-			// Egads! The particle was actually a dimer^H^H^H^H^Htrimer all along!
-			let sites = {
-//				let disp = random_direction(&mut rng).mul_s(DIMER_INITIAL_SEP * 0.5);
-//				let disp = disp.frac(state.dimension);
-//				(reduce_pbc(pos.add_v(disp)), reduce_pbc(pos.sub_v(disp)))
-				((),(),).map(|_|
-					reduce_pbc(pos.add_v(random_direction(&mut rng).mul_s(DIMER_INITIAL_SEP * 0.5).frac(state.dimension)))
-				)
-			};
-
-			// Place the particle.
-			//state.extend_and_relax(sites.into_iter());
-			//state.extend_and_relax(sites.into_iter());
-			for p in sites.into_iter() { state.insert(LABEL_CARBON, p) }
-			let n_free = state.relax_neighborhood(pos, Cart(5.));
-
-			// debugging info
-			timer.push();
-			writeln!(stderr(), "({:22},{:22},{:22})  ({:8?} ms)  (avg: {:8?} ms)  (relaxed {:8})",
-				(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free
-			).unwrap();
-
-			break 'restart;
+			pos = reduce_pbc(pos.add_v(disp));
 		}
 
-		write_xyz(&state, &mut stdout(), final_particles);
-*/
+		{ // make the two angles random
+			let i = state.closest_neighbor(pos, nbr_radius).unwrap();
+			let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+			let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+		}
+
+		// HACK to get relaxed positions, ignoring the code in state
+		// (tbh neighbor finding and relaxation should be separated out of state)
+		{
+			let pos = tree.positions();
+			let mut fixed = vec![true; pos.len()-2];
+			fixed.resize(pos.len(), false);
+
+			let mut pos = sp2::relax(pos, fixed, state.dimension);
+
+			// Replace positions in tree through even more terrible hax
+			// (NOTE: using Prim's algorithm would allow this to be done more efficiently)
+			let pos_2 = pos.pop().unwrap();
+			let pos_1 = pos.pop().unwrap();
+			let (label_2, parent_2, _old_pos) = tree.pop().unwrap();
+			let (label_1, parent_1, _old_pos) = tree.pop().unwrap();
+			tree.attach_at(parent_1.unwrap(), label_1, pos_1);
+			tree.attach_at(parent_2.unwrap(), label_2, pos_2);
+		}
+		let n_free = 2;
+
+		// debugging info
+		timer.push();
+		writeln!(stderr(), "({:22},{:22},{:22})  ({:8?} ms)  (avg: {:8?} ms)  (relaxed {:3})",
+			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free
+		).unwrap();
+
+		write_xyz(&tree, &mut stdout(), final_particles);
 	}
+*/
+
 	write_xyz(&tree, &mut stdout(), final_particles);
 	assert_eq!(final_particles, tree.len());
 	tree
