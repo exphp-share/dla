@@ -11,7 +11,7 @@ rand = "0.3"
 itertools = "0.5"
 newtype-ops = "0.1.3"
 libc = "0.2"
-#rustimization = "*"
+nalgebra = "0.10"
 
 [dependencies.ncg_min]
 git = "https://github.com/rekka/ncg_min"

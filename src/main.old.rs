@@ -5,25 +5,27 @@ const NPARTICLE: usize = 100;
 
 // VM: * Dimer sep should be 1.4 (Angstrom)
 //     * Interaction radius (to begin relaxation) should be 2
-
-// const CORE_RADIUS: Float = 5.0;
-// const INTRA_CHAIN_SEP: Cart = Cart(1.);
+const CORE_RADIUS: Float = 5.0;
+const INTRA_CHAIN_SEP: Cart = Cart(1.);
 const PARTICLE_RADIUS: Cart = Cart(1.);//Cart(0.4);
 const MOVE_RADIUS: Cart = Cart(1.);
 const DIMER_INITIAL_SEP: Cart = Cart(1.4);
 const HEX_INITIAL_RADIUS: Cart = Cart(0.5);
-// const RELAX_FREE_RADIUS: Cart = Cart(10.);
-// const RELAX_NEIGHBORHOOD_FACTOR: f64 = 10.;
+const RELAX_FREE_RADIUS: Cart = Cart(10.);
+const RELAX_NEIGHBORHOOD_FACTOR: f64 = 10.;
 
 const CART_ORIGIN: Trip<Cart> = (Cart(0.), Cart(0.), Cart(0.));
-// const FRAC_ORIGIN: Trip<Frac> = (Frac(0.), Frac(0.), Frac(0.));
-// const ORIGIN: Trip<Float> = (0., 0., 0.);
+const FRAC_ORIGIN: Trip<Frac> = (Frac(0.), Frac(0.), Frac(0.));
+const ORIGIN: Trip<Float> = (0., 0., 0.);
 
-// const THETA_STRENGTH: Float = 1.0;
-// const RADIUS_STRENGTH: Float = 1.0;
-// const TARGET_RADIUS: Float = 1.0;
+const THETA_STRENGTH: Float = 1.0;
+const RADIUS_STRENGTH: Float = 1.0;
+const TARGET_RADIUS: Float = 1.0;
 
-// what a mess I've made; how did we accumulate so many dependencies? O_o
+// could use an enum here but bleh
+const LABEL_SILICON: &'static str = "Si";
+const LABEL_CARBON:  &'static str = "C";
+
 extern crate time;
 extern crate rand;
 #[macro_use(zip_with)]
@@ -34,8 +36,6 @@ extern crate itertools;
 extern crate newtype_ops;
 extern crate dla_sys;
 extern crate libc;
-extern crate nalgebra;
-
 
 mod sp2;
 
@@ -45,8 +45,6 @@ use itertools::Itertools;
 use homogenous::prelude::*;
 use homogenous::numeric::prelude::*;
 use time::precise_time_ns;
-use nalgebra as na;
-use nalgebra::{Rotation as NaRotation, Translation as NaTranslation};
 
 use std::ops::Range;
 use std::io::Write;
@@ -57,82 +55,6 @@ use std::f64::consts::PI;
 type Float = f64;
 type Pair<T> = (T,T);
 type Trip<T> = (T,T,T);
-
-type NaIso = na::Mat3<Float>;
-type NaVector3 = na::Vector3<Float>;
-type NaPoint3 = na::Point3<Float>;
-
-// could use an enum but meh
-type Label = &'static str;
-const LABEL_CARBON: Label = "C";
-const LABEL_SILICON: Label = "Si";
-
-struct Tree {
-	// FIXME 'label' is misleading;  These are metadata, not identifiers.
-	labels: Vec<Label>,
-	// transformation from a plain cartesian basis into one
-	// where this atom is at the origin, and x points away from parent.
-	isos: Vec<NaIso>,
-	parents: Vec<Option<usize>>,
-}
-
-fn identity_iso() -> NaIso { NaIso::new(na::zero(), na::zero()) }
-
-impl Tree {
-	fn from_two(Cart(length): Cart, labels: (Label,Label)) -> Self {
-		// Begins with two atoms; one at the origin and one at (length, 0., 0.).
-
-		// Beginning with two atoms allows us to define a root node easily;
-		// * the atom at the origin will be the child of the second
-		// * the second atom will be a child of a "ghost" at the origin.
-		//   (hence both represent the same bond, but there's no parent cycle)
-
-		// at origin, let x point away from atom 2
-		let iso_1 = NaIso::new(na::zero(), na::Vector3 { y: 180f64.to_radians(), ..na::zero() });
-		// at atom 2, let x point away from origin
-		let iso_2 = NaIso::new(na::Vector3 { x: length, ..na::zero() }, na::zero());
-		Tree {
-//			classes: vec![Class::Ghost, classes.1, classes.0],
-//			isos:    vec![identity_iso(), iso_2, iso_1],
-//			parents: vec![None, Some(0), Some(1)],
-			labels: vec![labels.0, labels.1],
-			isos:    vec![iso_1, iso_2],
-			parents: vec![None, Some(0)],
-		}
-	}
-
-	fn len(&self) -> usize { self.labels.len() }
-
-	// mutators simply to contain all the junk relating to nalgebra
-	fn translate_mut(&mut self, t: Trip<Cart>) {
-		for iso in &mut self.isos { iso.append_translation_mut(&to_na_vector(t)); }
-	}
-	fn rotate_z_mut(&mut self, r: f64) {
-		for iso in &mut self.isos { iso.append_rotation_mut(&na::Vector3 { z: r, ..na::zero() }); }
-	}
-
-	fn attach_new(&mut self, parent: usize, label: Label, Cart(length): Cart, beta: f64) -> usize {
-		assert!(parent < self.len());
-
-		// NOTE: nalgebra's "append/prepend" are defined in chronological terms;
-		// The appended operation is performed last. (it is the first matrix when read ltr)
-		let iso = self.isos[parent]
-			.append_translation(&na::Vector3 { x: length, ..na::zero() })
-			.append_rotation(&na::Vector3 { y: 60f64.to_radians(), ..na::zero() })
-			.append_rotation(&na::Vector3 { x: beta, ..na::zero() })
-			;
-
-		self.parents.push(Some(parent));
-		self.isos.push(iso);
-		self.labels.push(label);
-		self.isos.len()-1
-	}
-
-	fn positions(&self) -> Vec<Trip<Cart>> {
-		self.isos.iter().map(|iso| from_na_vector(iso.translation)).collect()
-	}
-}
-
 
 //--------------------
 // For statically proving that fractional/cartesian conversions are handled properly.
@@ -150,18 +72,10 @@ newtype_ops!{ {[Frac][Cart]} arithmetic {:=} {^&}Self {^&}{Self Float} }
 // cart() and frac() methods for triples
 trait ToCart { fn cart(self, dimension: Trip<Float>) -> Trip<Cart>; }
 trait ToFrac { fn frac(self, dimension: Trip<Float>) -> Trip<Frac>; }
-trait ToVec3 { fn na_vector(self) -> na::Vector3<Float>; }
 impl ToCart for Trip<Frac> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { zip_with!((self,dimension) |x,d| x.cart(d)) } }
 impl ToFrac for Trip<Cart> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { zip_with!((self,dimension) |x,d| x.frac(d)) } }
 impl ToCart for Trip<Cart> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { self } }
 impl ToFrac for Trip<Frac> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { self } }
-
-// nalgebra interop, but strictly for cartesian
-fn to_na_vector((x,y,z): Trip<Cart>) -> na::Vector3<Float> { na::Vector3 { x: x.0, y: y.0, z: z.0 } }
-fn to_na_point((x,y,z): Trip<Cart>)  -> na::Point3<Float>  { na::Point3  { x: x.0, y: y.0, z: z.0 } }
-
-fn from_na_vector(na::Vector3 {x,y,z}: na::Vector3<Float>) -> Trip<Cart> { (x,y,z).map(|x| Cart(x)) }
-fn from_na_point(na::Point3 {x,y,z}: na::Point3<Float>) -> Trip<Cart> { (x,y,z).map(|x| Cart(x)) }
 
 fn reduce_pbc(this: Trip<Frac>) -> Trip<Frac> { this.map(|Frac(x)| Frac((x.fract() + 1.0).fract())) }
 fn nearest_image_dist_sq<P:ToFrac,Q:ToFrac>(this: P, that: Q, dimension: Trip<Float>) -> Cart {
@@ -238,7 +152,7 @@ fn update_upper_hint(mut hint: usize, sorted: &[Frac], needle: Frac) -> usize {
 
 //--------------------------
 struct State {
-	labels: Vec<Label>,
+	labels: Vec<&'static str>,
 	positions: Vec<Trip<Cart>>,
 	dimension: Trip<Float>,
 	// tracks x +/- move_radius index on each axis
@@ -252,16 +166,16 @@ impl State {
 		State {
 			labels: vec![],
 			positions: vec![],
-			dimension: dimension,
 			hints: ((),(),()).map(|_| 0..0),
+			dimension: dimension,
 			sorted: ((),(),()).map(|_| SortedIndices::new()),
 		}
 	}
 
-	fn from_positions<P:ToFrac,I:IntoIterator<Item=(P,Label)>>(dimension: Trip<f64>, pos: I) -> State {
+	fn from_sites<P:ToFrac,I:IntoIterator<Item=P>>(dimension: Trip<f64>, pos: I) -> State {
 		let mut this = State::new(dimension);
-		for (x, lbl) in pos {
-			this.insert(lbl, reduce_pbc(x.frac(dimension)));
+		for x in pos {
+			this.insert(LABEL_SILICON, reduce_pbc(x.frac(dimension)));
 		}
 		this
 	}
@@ -276,7 +190,7 @@ impl State {
 		});
 	}
 
-	fn insert(&mut self, label: Label, point: Trip<Frac>) {
+	fn insert(&mut self, label: &'static str, point: Trip<Frac>) {
 		let point = reduce_pbc(point);
 		let i = self.positions.len();
 		self.positions.push(point.cart(self.dimension));
@@ -352,9 +266,20 @@ impl State {
 	}
 }
 
-fn write_xyz<W: Write>(tree: &Tree, file: &mut W, final_length: usize) {
-	let mut lab = tree.labels.clone();
-	let mut pos = tree.positions();
+fn output<W: Write>(state: &State, file: &mut W) {
+	writeln!(file, "[").unwrap();
+	let mut first = true;
+	for (&(Cart(x),Cart(y),Cart(z)), label) in state.positions.iter().zip(&state.labels) {
+		write!(file, "{}", if first { "" } else { ",\n " }).unwrap();
+		write!(file, "[{:?},[{},{},{}]]", label, x, y, z).unwrap();
+		first = false;
+	}
+	writeln!(file, "]").unwrap();
+}
+
+fn write_xyz<W: Write>(state: &State, file: &mut W, final_length: usize) {
+	let mut lab = state.labels.clone();
+	let mut pos = state.positions.clone();
 	let first = *pos.first().unwrap();
 
 	lab.resize(final_length, LABEL_CARBON);
@@ -394,24 +319,45 @@ fn random_border_position<R:Rng>(rng: &mut R) -> Trip<Frac> {
 	}
 }
 
+fn chain_nucleus(dimension: Trip<f64>) -> State {
+	let mut state = State::new(dimension);
+	let n = (Cart(dimension.2) / INTRA_CHAIN_SEP).0.round() as i32;
+	for i in 0i32..n {
+		state.insert(LABEL_SILICON, (Frac(0.5), Frac(0.5), Frac(i as Float / n as Float)));
+	}
+	state
+}
+
 fn rotate((Cart(x),Cart(y)): (Cart,Cart), angle: Float) -> (Cart,Cart) {
 	let (sin,cos) = (angle.sin(), angle.cos());
 	(Cart(cos * x - sin * y), Cart(cos * y + sin * x))
 }
 
-fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
-	let mut tree = Tree::from_two(DIMER_INITIAL_SEP, (LABEL_SILICON, LABEL_SILICON));
-	let i = tree.attach_new(0, LABEL_SILICON, DIMER_INITIAL_SEP, PI/2.);
-	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI/2.);
-	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI/2.);
-	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI/2.);
-//	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI/2.);
-//	let i = tree.attach_new(1, LABEL_SILICON, DIMER_INITIAL_SEP, -PI/2.);
-//	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, -PI/2.);
+fn hexagon_sites(dimension: Trip<f64>) -> Vec<Trip<Cart>> {
+	let pos =
+		::itertools::iterate((Cart(0.), HEX_INITIAL_RADIUS), |&p| rotate(p, PI/3.))
+		.map(|(x,y)| (x,y,Cart(0.)))
+		.take(6).collect_vec();
 
 	// optimize bond length
-	//let pos = sp2::relax_all(pos, (0.,0.,0.));
-	tree
+	let pos = sp2::relax_all(pos, (0.,0.,0.));
+	recenter_origin(pos, dimension)
+}
+
+fn hexagon_nucleus(dimension: Trip<f64>) -> State {
+	State::from_sites(dimension, recenter_midpoint(hexagon_sites(dimension), dimension))
+}
+
+fn remove_overlapping(mut vec: Vec<Trip<Cart>>, threshold: Cart) -> Vec<Trip<Cart>> {
+	let mut i = 0;
+	loop {
+		if i >= vec.len() { break; }
+		let bad = (&vec[0..i]).iter().any(|&q| vec[i].sub_v(q).sqnorm() < threshold*threshold);
+
+		if bad { vec.swap_remove(i); }
+		else { i += 1; }
+	}
+	vec
 }
 
 fn center(pos: &Vec<Trip<Cart>>) -> Trip<Cart> {
@@ -419,10 +365,20 @@ fn center(pos: &Vec<Trip<Cart>>) -> Trip<Cart> {
 	pos.iter().fold(CART_ORIGIN, |u,&b| u.add_v(b)).div_s(n)
 }
 
-// TODO
-fn do_mst() { unimplemented!() }
+// FIXME poor abstraction (reduce_pbc or no?)
+fn recenter_origin(pos: Vec<Trip<Cart>>, dimension: Trip<f64>) -> Vec<Trip<Cart>> {
+	let center = center(&pos);
+	pos.into_iter().map(|x|
+		x.sub_v(center).frac(dimension).cart(dimension)
+	).collect()
+}
+fn recenter_midpoint(pos: Vec<Trip<Cart>>, dimension: Trip<f64>) -> Vec<Trip<Cart>> {
+	let center = center(&pos);
+	pos.into_iter().map(|x|
+		reduce_pbc(x.sub_v(center).frac(dimension).add_s(Frac(0.5))).cart(dimension)
+	).collect()
+}
 
-/*
 fn seven_hexagon_nucleus(dimension: Trip<f64>) -> State {
 	let mut pos = hexagon_sites(dimension);
 	pos.sort_by(|&(x,y,_), &(x2,y2,_)| (y.0.atan2(x.0)).partial_cmp(&y2.0.atan2(x2.0)).unwrap());
@@ -445,7 +401,8 @@ fn seven_hexagon_nucleus(dimension: Trip<f64>) -> State {
 	assert_eq!(pos.len(), 24);
 	State::from_sites(dimension, pos)
 }
-*/
+
+
 
 use std::collections::vec_deque::VecDeque;
 struct Timer { deque: VecDeque<u64> }
@@ -468,8 +425,8 @@ impl Timer {
 	}
 }
 
-fn dla_run() -> Tree {
-	let mut tree = hexagon_nucleus(DIMENSION);
+fn dla_run() -> State {
+	let mut state = hexagon_nucleus(DIMENSION);
 
 	let mut rng = rand::weak_rng();
 
@@ -477,9 +434,8 @@ fn dla_run() -> Tree {
 
 	let mut timer = Timer::new(30);
 
-	let final_particles = 2*NPARTICLE + tree.len();
+	let final_particles = 2*NPARTICLE + state.positions.len();
 	for n in 0..NPARTICLE {
-/*
 		write!(stderr(), "Particle {:8} of {:8}: ", n, NPARTICLE).unwrap();
 
 		// loop to skip relaxation failures
@@ -523,11 +479,9 @@ fn dla_run() -> Tree {
 		}
 
 		write_xyz(&state, &mut stdout(), final_particles);
-*/
 	}
-	write_xyz(&tree, &mut stdout(), final_particles);
-	assert_eq!(final_particles, tree.len());
-	tree
+	assert_eq!(final_particles, state.positions.len());
+	state
 }
 
 fn main() {
