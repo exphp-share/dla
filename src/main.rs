@@ -1,6 +1,4 @@
 
-#![feature(iter_min_by)]
-
 // FIXME inconsistent usage of DIMENSION and state.dimension
 const DIMENSION: Trip<Float> = (100., 100., 6.);
 const NPARTICLE: usize = 100;
@@ -467,16 +465,21 @@ impl State {
 	}
 }
 
-fn write_xyz<W: Write>(tree: &Tree, mut file: W, final_length: usize) {
-	let mut lab = tree.labels.clone();
-	let mut pos = tree.pos.clone();
-	let first = *pos.first().unwrap();
+fn write_xyz<W: Write>(mut file: W, tree: &Tree, final_length: usize) {
+	write_xyz_(file, tree.pos.clone(), tree.labels.clone(), final_length);
+}
 
-	lab.resize(final_length, LABEL_CARBON);
+fn write_xyz_<W: Write, I,J>(mut file: W, pos: I, labels: J, final_length: usize)
+where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Label> {
+	let mut pos = pos.into_iter().collect_vec();
+	let mut labels = labels.into_iter().collect_vec();
+	let first = pos[0];
+
+	labels.resize(final_length, LABEL_CARBON);
 	pos.resize(final_length, first);
 	writeln!(file, "{}", final_length);
 	writeln!(file, "blah blah blah");
-	for (&label, &(Cart(x),Cart(y),Cart(z))) in lab.iter().zip(&pos) {
+	for (label, (Cart(x),Cart(y),Cart(z))) in labels.into_iter().zip(pos) {
 		writeln!(file, "{} {} {} {}", label, x, y, z);
 	}
 }
@@ -621,7 +624,7 @@ impl Timer {
 
 fn test_outputs() {
 	let doit = |tree, path| {
-		write_xyz(&tree, ::std::fs::File::create(path).unwrap(), tree.len());
+		write_xyz(::std::fs::File::create(path).unwrap(), &tree, tree.len());
 	};
 	doit(hexagon_nucleus(DIMENSION), "hexagon.xyz");
 
@@ -696,10 +699,14 @@ fn dla_run() -> Tree {
 			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free
 		).unwrap();
 
-		write_xyz(&tree, &mut stdout(), final_particles);
+		write_xyz(&mut stdout(), &tree, final_particles);
 	}
 
-	write_xyz(&tree, &mut stdout(), final_particles);
+	{
+		let dimension = tree.dimension;
+		let pos = tree.pos.clone().into_iter().map(|x| reduce_pbc(x.frac(dimension)).cart(dimension));
+		write_xyz_(&mut stdout(), pos, tree.labels.clone(), final_particles);
+	}
 	assert_eq!(final_particles, tree.len());
 	tree
 }
