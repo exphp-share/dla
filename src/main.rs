@@ -65,6 +65,8 @@ type NaVector3 = na::Vector3<Float>;
 type NaPoint3 = na::Point3<Float>;
 
 fn identity() -> NaIso { NaIso::new(na::zero(), na::zero()) }
+fn translate((Cart(x),Cart(y),Cart(z)): Trip<Cart>) -> NaIso { NaIso::new(NaVector3{x:x,y:y,z:z}, na::zero()) }
+fn rotate((x,y,z): Trip<Float>) -> NaIso { NaIso::new(na::zero(), NaVector3{x:x,y:y,z:z}) }
 fn na_x(r: Float) -> NaVector3 { na::Vector3{x:r, ..na::zero()} }
 fn na_y(r: Float) -> NaVector3 { na::Vector3{y:r, ..na::zero()} }
 fn na_z(r: Float) -> NaVector3 { na::Vector3{z:r, ..na::zero()} }
@@ -76,66 +78,62 @@ const LABEL_SILICON: Label = "Si";
 
 //---------------------------------
 
+// FIXME misnomer; not actually a tree; the first two atoms point to each other
+#[derive(Clone)]
 struct Tree {
 	// FIXME 'label' is misleading;  These are metadata, not identifiers.
 	labels: Vec<Label>,
-	// transformation from a plain cartesian basis into one
-	// where this atom is at the origin, and x points away from parent.
-	isos: Vec<NaIso>,
-	parents: Vec<Option<usize>>,
+	pos: Vec<Trip<Cart>>,
+	parents: Vec<usize>,
+	dimension: Trip<Float>,
 }
 
-/*
-fn closest_pair_indices_bipartite<I,J>(iter: I, jtre: J, dimension: Trip<Float>) -> Option<(usize,usize)>
-where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Trip<Cart>>,
-{
-	iproduct!(iter.into_iter().enumerate(), jtre.into_iter().enumerate())
-		.map(|((i,p),(j,q))| (Some((i,j)), nearest_image_dist_sq(p,q,dimension)))
-		.fold((None, Cart(::std::f64::MAX)), |(i,p),(j,q)| if p < q { (i,p) } else { (j,q) })
-		.0
-}
+// get an isometry that maps the origin to a given atom,
+// and maps the x unit vector away from its parent.
+fn bond_iso(pos: Trip<Cart>, parent: Trip<Cart>, dimension: Trip<Float>) -> NaIso {
+	// this implementation... is the result of pure trial and error.
+	let (x,y,z) = nearest_image_sub(pos, parent, dimension).map(|x| x.0);
 
-fn closest_pair_indices_within<I,J>(iter: I, jtre: J, dimension: Trip<Float>) -> Option<(usize,usize)>
-where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Trip<Cart>>,
-{
-	iproduct!(iter.into_iter().enumerate(), jtre.into_iter().enumerate())
-		.map(|((i,p),(j,q))| (Some((i,j)), nearest_image_dist_sq(p,q,dimension)))
-		.fold((None, Cart(::std::f64::MAX)), |(i,p),(j,q)| if p < q { (i,p) } else { (j,q) })
-		.0
+	let beta = y.atan2(-z);
+	let na::Point3 {x,y,z} = identity().append_rotation(&na_x(-beta)) * na::Point3 { x:x, y:y, z:z };
+	assert!(y.abs() < 1e-5, "{}", y);
+
+	let alpha = (-z).atan2(x);
+	let na::Point3 {x,y,z} = identity().append_rotation(&na_y(-alpha)) * na::Point3 { x:x, y:y, z:z };
+	assert!(z.abs() < 1e-5, "{}", z);
+
+	let t = x;
+
+	identity()
+		.append_translation(&na_x(t))
+		.append_rotation(&na_y(alpha))
+		.append_rotation(&na_x(beta))
+		.append_translation(&to_na_vector(parent))
 }
-*/
 
 impl Tree {
-	fn from_two(Cart(cart): Cart, labels: (Label,Label)) -> Self {
-		// Begins with two atoms; one at the origin and one at (length, 0., 0.).
-
-		// Beginning with two atoms allows us to define a root node easily;
-		// * the atom at the origin will be the child of the second
-		// * the second atom will be a child of a "ghost" at the origin.
-		//   (hence both represent the same bond, but there's no parent cycle)
-
-		// at origin, let x point away from atom 2
-		let iso_1 = identity().append_rotation(&na_z(180f64.to_radians()));
-		// at atom 2, let x point away from origin
-		let iso_2 = identity().append_translation(&na_x(cart));
+	fn from_two(dimension: Trip<Float>, length: Cart, labels: (Label,Label)) -> Self {
+		Tree::from_two_pos(dimension, (CART_ORIGIN, (length, Cart(0.), Cart(0.))), labels)
+	}
+	fn from_two_pos(dimension: Trip<Float>, pos: (Trip<Cart>, Trip<Cart>), labels: (Label,Label)) -> Self {
 		Tree {
-//			classes: vec![Class::Ghost, classes.1, classes.0],
-//			isos:    vec![identity_iso(), iso_2, iso_1],
-//			parents: vec![None, Some(0), Some(1)],
 			labels:  vec![labels.0, labels.1],
-			isos:    vec![iso_1, iso_2],
-			parents: vec![None, Some(0)],
+			pos:     vec![pos.0, pos.1],
+			parents: vec![1, 0],
+			dimension: dimension,
 		}
 	}
 
-	fn from_two_pos((p,q): (Trip<Cart>, Trip<Cart>), labels: (Label,Label)) -> Self {
-		unimplemented!() // TODO ffs
+	fn transform_mut(&mut self, iso: NaIso) {
+		for p in &mut self.pos {
+			*p = from_na_point(iso * to_na_point(*p));
+		}
 	}
 
 	fn len(&self) -> usize { self.labels.len() }
 
-	fn transform_mut(&mut self, iso: NaIso) {
-		for x in &mut self.isos { x.append_transformation_mut(&iso) }
+	fn bond_iso(&self, index: usize) -> NaIso {
+		bond_iso(self.pos[index], self.pos[self.parents[index]], self.dimension)
 	}
 
 	fn attach_new(&mut self, parent: usize, label: Label, Cart(cart): Cart, beta: f64) -> usize {
@@ -147,58 +145,22 @@ impl Tree {
 			.append_translation(&na_x(cart))
 			.append_rotation(&na_y(60f64.to_radians()))
 			.append_rotation(&na_x(beta))
-			.append_transformation(&self.isos[parent])
+			.append_transformation(&self.bond_iso(parent))
 			;
+		let na::Vector3 { x, y, z } = iso.translation;
 
-//		// NOTE: This should be equivalent to the next four lines. (check with squiggle_core)
-//		self.attach_at(parent, label, from_na_vector(iso.translation))
-
-		self.parents.push(Some(parent));
-		self.isos.push(iso);
-		self.labels.push(label);
-		self.isos.len()-1
+		self.attach_at(parent, label, (x,y,z).map(|x| Cart(x)))
 	}
 
-	fn attach_at(&mut self, parent: usize, label: Label, point: Trip<Cart>, dimension: Trip<Float>) -> usize {
+	fn attach_at(&mut self, parent: usize, label: Label, point: Trip<Cart>) -> usize {
 		assert!(parent < self.len());
-
-		// this method is disgusting
-		// the goal is to produce take an arbitrary point and break it down into the
-		// parameterization that attach_new uses.
-
-		// the implementation... is the result of pure trial and error.
-		let (x,y,z) = point.map(|x| x.0);
-		let na::Point3 {x,y,z} = self.isos[parent].inverse_transformation() * na::Point3 { x:x, y:y, z:z };
-
-		// nearest image
-		// TODO: Test that this works/is needed
-		let (x,y,z) = zip_with!(((x,y,z), dimension) |x,d| x - (x/d).round()*d);
-
-		let beta = y.atan2(-z);
-		let na::Point3 {x,y,z} = identity().append_rotation(&na_x(-beta)) * na::Point3 { x:x, y:y, z:z };
-		assert!(y.abs() < 1e-5, "{}", z);
-
-		let alpha = (-z).atan2(x);
-		let na::Point3 {x,y,z} = identity().append_rotation(&na_y(-alpha)) * na::Point3 { x:x, y:y, z:z };
-		assert!(z.abs() < 1e-5, "{}", x);
-
-		let t = x;
-
-		writeln!(stderr(), " ALPHA {} BETA {} ", alpha.to_degrees(), beta.to_degrees());
-		let iso = identity()
-			.append_translation(&na_x(t))
-			.append_rotation(&na_y(alpha))
-			.append_rotation(&na_x(beta))
-			.append_transformation(&self.isos[parent])
-			;
-
-		self.parents.push(Some(parent));
-		self.isos.push(iso);
+		self.parents.push(parent);
+		self.pos.push(point);
 		self.labels.push(label);
-		self.isos.len()-1
+		self.pos.len()-1
 	}
 
-	fn extend<I:IntoIterator<Item=Label>, J: IntoIterator<Item=Trip<Cart>>>(&mut self, dimension: Trip<Float>, new_pos: J, new_labels: I) {
+	fn extend<I:IntoIterator<Item=Label>, J: IntoIterator<Item=Trip<Cart>>>(&mut self, new_pos: J, new_labels: I) {
 		let mut new_labels = new_labels.into_iter().collect_vec();
 		let mut new_pos = new_pos.into_iter().collect_vec();
 		assert_eq!(new_labels.len(), new_pos.len());
@@ -207,14 +169,14 @@ impl Tree {
 		// NOTE: brute force implementation
 		while !new_pos.is_empty() {
 
-			let tree_positions = self.positions();
+			let tree_positions = self.pos.clone();
 
 			let (i_child, i_parent) = {
 				let mut best_dist = Cart(::std::f64::MAX);
 				let mut best_idxs = None;
 				for (i_child,&p) in new_pos.iter().enumerate() {
 					for (i_parent,&q) in tree_positions.iter().enumerate() {
-						let sqdist = nearest_image_dist_sq(p,q,dimension);
+						let sqdist = nearest_image_dist_sq(p,q,self.dimension);
 						if sqdist < best_dist {
 							best_dist = sqdist;
 							best_idxs = Some((i_child,i_parent));
@@ -226,7 +188,7 @@ impl Tree {
 
 			let label = new_labels.remove(i_child);
 			let point = new_pos.remove(i_child);
-			self.attach_at(i_parent, label, point, dimension);
+			self.attach_at(i_parent, label, point);
 		}
 	}
 
@@ -254,27 +216,25 @@ impl Tree {
 			best_idxs
 		}.unwrap(); // there are at least two nodes
 
-		let label_1 = labels.swap_remove(i);
-		let label_2 = labels.swap_remove(j);
-		let pos_1 = pos.swap_remove(i);
-		let pos_2 = pos.swap_remove(j);
+		assert!(i > j);
+		let label_1 = labels.remove(i);
+		let label_2 = labels.remove(j);
+		let pos_1 = pos.remove(i);
+		let pos_2 = pos.remove(j);
 
-		let mut tree = Tree::from_two_pos((pos_1, pos_2), (label_1, label_2));
-		tree.extend(dimension, pos, labels);
+		let mut tree = Tree::from_two_pos(dimension, (pos_1, pos_2), (label_1, label_2));
+		tree.extend(pos, labels);
 		tree
 	}
 
 	// FIXME hack
-	fn pop(&mut self) -> Option<(Label, Option<usize>, Trip<Cart>)> {
+	fn pop(&mut self) -> Option<(Label, usize, Trip<Cart>)> {
+		assert!(self.len() > 2); // can't remove second atom, because the first points to it
 		self.labels.pop().map(|label| {
 			let parent = self.parents.pop().unwrap();
-			let pos = from_na_vector(self.isos.pop().unwrap().translation);
+			let pos = self.pos.pop().unwrap();
 			(label, parent, pos)
 		})
-	}
-
-	fn positions(&self) -> Vec<Trip<Cart>> {
-		self.isos.iter().map(|iso| from_na_vector(iso.translation)).collect()
 	}
 }
 
@@ -295,7 +255,6 @@ newtype_ops!{ {[Frac][Cart]} arithmetic {:=} {^&}Self {^&}{Self Float} }
 // cart() and frac() methods for triples
 trait ToCart { fn cart(self, dimension: Trip<Float>) -> Trip<Cart>; }
 trait ToFrac { fn frac(self, dimension: Trip<Float>) -> Trip<Frac>; }
-trait ToVec3 { fn na_vector(self) -> na::Vector3<Float>; }
 impl ToCart for Trip<Frac> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { zip_with!((self,dimension) |x,d| x.cart(d)) } }
 impl ToFrac for Trip<Cart> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { zip_with!((self,dimension) |x,d| x.frac(d)) } }
 impl ToCart for Trip<Cart> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { self } }
@@ -508,9 +467,9 @@ impl State {
 	}
 }
 
-fn write_xyz<W: Write>(tree: &Tree, file: &mut W, final_length: usize) {
+fn write_xyz<W: Write>(tree: &Tree, mut file: W, final_length: usize) {
 	let mut lab = tree.labels.clone();
-	let mut pos = tree.positions();
+	let mut pos = tree.pos.clone();
 	let first = *pos.first().unwrap();
 
 	lab.resize(final_length, LABEL_CARBON);
@@ -550,15 +509,26 @@ fn random_border_position<R:Rng>(rng: &mut R) -> Trip<Frac> {
 	}
 }
 
-fn rotate((Cart(x),Cart(y)): (Cart,Cart), angle: Float) -> (Cart,Cart) {
-	let (sin,cos) = (angle.sin(), angle.cos());
-	(Cart(cos * x - sin * y), Cart(cos * y + sin * x))
-}
-
 // for debugging the isometries; this should be a barbell shape, with
 // 4 atoms protruding from each end in 4 diagonal directions
 fn barbell_nucleus(dimension: Trip<f64>) -> Tree {
-	let mut tree = Tree::from_two(DIMER_INITIAL_SEP, ("Si", "C"));
+	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, ("Si", "C"));
+	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*0.0);
+	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*0.5);
+	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*1.0);
+	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*1.5);
+	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*0.0);
+	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*0.5);
+	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*1.0);
+	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*1.5);
+	tree
+}
+
+fn random_barbell_nucleus(dimension: Trip<f64>) -> Tree {
+	let dir = random_direction(&mut rand::weak_rng());
+	let pos1 = ((),(),()).map(|_| Frac(rand::weak_rng().next_f64())).cart(dimension);
+	let pos2 = pos1.add_v(dir.mul_s(DIMER_INITIAL_SEP));
+	let mut tree = Tree::from_two_pos(dimension, (pos1,pos2), ("Si", "C"));
 	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*0.0);
 	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*0.5);
 	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*1.0);
@@ -572,7 +542,7 @@ fn barbell_nucleus(dimension: Trip<f64>) -> Tree {
 
 // for debugging reattachment;
 fn squiggle_nucleus(dimension: Trip<f64>) -> Tree {
-	let mut tree = Tree::from_two(DIMER_INITIAL_SEP, ("Si", "Si"));
+	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, ("Si", "Si"));
 	let mut i = 0;
 	for k in 0..16 {
 		i = tree.attach_new(i, "Si", DIMER_INITIAL_SEP, PI*(k as f64)/(16 as f64));
@@ -586,25 +556,22 @@ fn squiggle_nucleus(dimension: Trip<f64>) -> Tree {
 }
 
 fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
-	let mut tree = Tree::from_two(DIMER_INITIAL_SEP, (LABEL_SILICON, LABEL_SILICON));
+	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (LABEL_SILICON, LABEL_SILICON));
 	let i = tree.attach_new(1, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
 	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
 	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
 	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
+	tree.transform_mut(translate(dimension.map(|d| Cart(d*0.5))));
 
-	// FIXME uncomment
-	// optimize bond length
-	//let pos = sp2::relax_all(pos, (0.,0.,0.));
-	tree
+	let Tree { pos, labels, dimension, .. } = tree;
+	let pos = sp2::relax_all(pos, dimension);
+	Tree::from_iter(dimension, pos, labels)
 }
 
 fn center(pos: &Vec<Trip<Cart>>) -> Trip<Cart> {
 	let n = Cart(pos.len() as Float);
 	pos.iter().fold(CART_ORIGIN, |u,&b| u.add_v(b)).div_s(n)
 }
-
-// TODO
-fn do_mst() { unimplemented!() }
 
 /*
 fn seven_hexagon_nucleus(dimension: Trip<f64>) -> State {
@@ -652,8 +619,24 @@ impl Timer {
 	}
 }
 
+fn test_outputs() {
+	let doit = |tree, path| {
+		write_xyz(&tree, ::std::fs::File::create(path).unwrap(), tree.len());
+	};
+	doit(hexagon_nucleus(DIMENSION), "hexagon.xyz");
+
+	doit(barbell_nucleus(DIMENSION), "barbell.xyz");
+	doit(random_barbell_nucleus(DIMENSION), "barbell-random.xyz");
+
+	let tree = squiggle_nucleus(DIMENSION);
+	doit(tree.clone(), "squiggle.xyz");
+	let Tree { dimension, labels, pos, .. } = tree;
+	let tree = Tree::from_iter(dimension, pos, labels);
+	doit(tree, "squiggle-rebuild.xyz");
+}
+
 fn dla_run() -> Tree {
-	let mut tree = squiggle_nucleus(DIMENSION);
+	let mut tree = hexagon_nucleus(DIMENSION);
 
 	let mut rng = rand::weak_rng();
 
@@ -663,11 +646,10 @@ fn dla_run() -> Tree {
 
 	let final_particles = 2*NPARTICLE + tree.len();
 
-/*
 	for n in 0..NPARTICLE {
 		write!(stderr(), "Particle {:8} of {:8}: ", n, NPARTICLE).unwrap();
 
-		let mut state = State::from_positions(DIMENSION, tree.positions().into_iter().zip(tree.labels.clone()));
+		let mut state = State::from_positions(DIMENSION, tree.pos.clone().into_iter().zip(tree.labels.clone()));
 
 		let mut pos = random_border_position(&mut rng);
 
@@ -690,23 +672,23 @@ fn dla_run() -> Tree {
 
 		// HACK to get relaxed positions, ignoring the code in state
 		// (tbh neighbor finding and relaxation should be separated out of state)
+		let n_free = 2;
 		{
-			let pos = tree.positions();
-			let mut fixed = vec![true; pos.len()-2];
-			fixed.resize(pos.len(), false);
+			let unrelaxed = tree.pos.clone();
+			let n_total = unrelaxed.len();
+			let n_fixed = n_total - n_free;
+			let mut fixed = vec![true; n_fixed];
+			fixed.resize(n_total, false);
 
-			let mut pos = sp2::relax(pos, fixed, state.dimension);
+			let relaxed = sp2::relax(unrelaxed, fixed, state.dimension);
 
 			// Replace positions in tree through even more terrible hax
-			// (NOTE: using Prim's algorithm would allow this to be done more efficiently)
-			let pos_2 = pos.pop().unwrap();
-			let pos_1 = pos.pop().unwrap();
-			let (label_2, parent_2, _old_pos) = tree.pop().unwrap();
-			let (label_1, parent_1, _old_pos) = tree.pop().unwrap();
-			tree.attach_at(parent_1.unwrap(), label_1, pos_1);
-			tree.attach_at(parent_2.unwrap(), label_2, pos_2);
+			let new_labels = tree.labels[n_fixed..].to_vec();
+			let new_pos    = relaxed[n_fixed..].to_vec();
+			tree.pop().unwrap();
+			tree.pop().unwrap();
+			tree.extend(new_pos, new_labels);
 		}
-		let n_free = 2;
 
 		// debugging info
 		timer.push();
@@ -716,7 +698,6 @@ fn dla_run() -> Tree {
 
 		write_xyz(&tree, &mut stdout(), final_particles);
 	}
-*/
 
 	write_xyz(&tree, &mut stdout(), final_particles);
 	assert_eq!(final_particles, tree.len());
@@ -724,5 +705,6 @@ fn dla_run() -> Tree {
 }
 
 fn main() {
+//	test_outputs();
 	dla_run();
 }

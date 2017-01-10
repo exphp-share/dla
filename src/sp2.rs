@@ -64,8 +64,8 @@ pub fn relax(pos: Vec<Trip<Cart>>, fixed: Vec<bool>, dim: Trip<f64>) -> Vec<Trip
 
 	assert_eq!(fixed.len(), pos.len());
 	let mut lattice = vec![
-		0., 0., 0.,
-		0., 0., 0.,
+		dim.0, 0., 0.,
+		0., dim.1, 0.,
 		0., 0., dim.2,
 	];
 
