@@ -74,6 +74,8 @@ type Label = &'static str;
 const LABEL_CARBON: Label = "C";
 const LABEL_SILICON: Label = "Si";
 
+//---------------------------------
+
 struct Tree {
 	// FIXME 'label' is misleading;  These are metadata, not identifiers.
 	labels: Vec<Label>,
@@ -83,6 +85,25 @@ struct Tree {
 	parents: Vec<Option<usize>>,
 }
 
+/*
+fn closest_pair_indices_bipartite<I,J>(iter: I, jtre: J, dimension: Trip<Float>) -> Option<(usize,usize)>
+where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Trip<Cart>>,
+{
+	iproduct!(iter.into_iter().enumerate(), jtre.into_iter().enumerate())
+		.map(|((i,p),(j,q))| (Some((i,j)), nearest_image_dist_sq(p,q,dimension)))
+		.fold((None, Cart(::std::f64::MAX)), |(i,p),(j,q)| if p < q { (i,p) } else { (j,q) })
+		.0
+}
+
+fn closest_pair_indices_within<I,J>(iter: I, jtre: J, dimension: Trip<Float>) -> Option<(usize,usize)>
+where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Trip<Cart>>,
+{
+	iproduct!(iter.into_iter().enumerate(), jtre.into_iter().enumerate())
+		.map(|((i,p),(j,q))| (Some((i,j)), nearest_image_dist_sq(p,q,dimension)))
+		.fold((None, Cart(::std::f64::MAX)), |(i,p),(j,q)| if p < q { (i,p) } else { (j,q) })
+		.0
+}
+*/
 
 impl Tree {
 	fn from_two(Cart(cart): Cart, labels: (Label,Label)) -> Self {
@@ -105,6 +126,10 @@ impl Tree {
 			isos:    vec![iso_1, iso_2],
 			parents: vec![None, Some(0)],
 		}
+	}
+
+	fn from_two_pos((p,q): (Trip<Cart>, Trip<Cart>), labels: (Label,Label)) -> Self {
+		unimplemented!() // TODO ffs
 	}
 
 	fn len(&self) -> usize { self.labels.len() }
@@ -134,7 +159,7 @@ impl Tree {
 		self.isos.len()-1
 	}
 
-	fn attach_at(&mut self, parent: usize, label: Label, point: Trip<Cart>) -> usize {
+	fn attach_at(&mut self, parent: usize, label: Label, point: Trip<Cart>, dimension: Trip<Float>) -> usize {
 		assert!(parent < self.len());
 
 		// this method is disgusting
@@ -144,6 +169,10 @@ impl Tree {
 		// the implementation... is the result of pure trial and error.
 		let (x,y,z) = point.map(|x| x.0);
 		let na::Point3 {x,y,z} = self.isos[parent].inverse_transformation() * na::Point3 { x:x, y:y, z:z };
+
+		// nearest image
+		// TODO: Test that this works/is needed
+		let (x,y,z) = zip_with!(((x,y,z), dimension) |x,d| x - (x/d).round()*d);
 
 		let beta = y.atan2(-z);
 		let na::Point3 {x,y,z} = identity().append_rotation(&na_x(-beta)) * na::Point3 { x:x, y:y, z:z };
@@ -167,6 +196,72 @@ impl Tree {
 		self.isos.push(iso);
 		self.labels.push(label);
 		self.isos.len()-1
+	}
+
+	fn extend<I:IntoIterator<Item=Label>, J: IntoIterator<Item=Trip<Cart>>>(&mut self, dimension: Trip<Float>, new_pos: J, new_labels: I) {
+		let mut new_labels = new_labels.into_iter().collect_vec();
+		let mut new_pos = new_pos.into_iter().collect_vec();
+		assert_eq!(new_labels.len(), new_pos.len());
+
+		// extend the tree greedily a la prim's algorithm
+		// NOTE: brute force implementation
+		while !new_pos.is_empty() {
+
+			let tree_positions = self.positions();
+
+			let (i_child, i_parent) = {
+				let mut best_dist = Cart(::std::f64::MAX);
+				let mut best_idxs = None;
+				for (i_child,&p) in new_pos.iter().enumerate() {
+					for (i_parent,&q) in tree_positions.iter().enumerate() {
+						let sqdist = nearest_image_dist_sq(p,q,dimension);
+						if sqdist < best_dist {
+							best_dist = sqdist;
+							best_idxs = Some((i_child,i_parent));
+						}
+					}
+				}
+				best_idxs
+			}.unwrap(); // tree and new_pos each have at least one node
+
+			let label = new_labels.remove(i_child);
+			let point = new_pos.remove(i_child);
+			self.attach_at(i_parent, label, point, dimension);
+		}
+	}
+
+	fn from_iter<I:IntoIterator<Item=Label>, J: IntoIterator<Item=Trip<Cart>>>(dimension: Trip<Float>, pos: J, labels: I) -> Self {
+		let mut labels = labels.into_iter().collect_vec();
+		let mut pos = pos.into_iter().collect_vec();
+		assert_eq!(labels.len(), pos.len());
+		assert!(pos.len() >= 2);
+
+		// find a minimum weight edge
+		// NOTE: this subtly differs from the search in extend() in that we are now
+		//  seeking two different indices from the SAME iterable.
+		let (i, j) = {
+			let mut best_dist = Cart(::std::f64::MAX);
+			let mut best_idxs = None;
+			for i in 0..pos.len() {
+				for j in 0..i {
+					let sqdist = nearest_image_dist_sq(pos[i],pos[j],dimension);
+					if sqdist < best_dist {
+						best_dist = sqdist;
+						best_idxs = Some((i,j));
+					}
+				}
+			}
+			best_idxs
+		}.unwrap(); // there are at least two nodes
+
+		let label_1 = labels.swap_remove(i);
+		let label_2 = labels.swap_remove(j);
+		let pos_1 = pos.swap_remove(i);
+		let pos_2 = pos.swap_remove(j);
+
+		let mut tree = Tree::from_two_pos((pos_1, pos_2), (label_1, label_2));
+		tree.extend(dimension, pos, labels);
+		tree
 	}
 
 	// FIXME hack
@@ -214,15 +309,19 @@ fn from_na_vector(na::Vector3 {x,y,z}: na::Vector3<Float>) -> Trip<Cart> { (x,y,
 fn from_na_point(na::Point3 {x,y,z}: na::Point3<Float>) -> Trip<Cart> { (x,y,z).map(|x| Cart(x)) }
 
 fn reduce_pbc(this: Trip<Frac>) -> Trip<Frac> { this.map(|Frac(x)| Frac((x.fract() + 1.0).fract())) }
-fn nearest_image_dist_sq<P:ToFrac,Q:ToFrac>(this: P, that: Q, dimension: Trip<Float>) -> Cart {
+fn nearest_image_sub<P:ToFrac,Q:ToFrac>(this: P, that: Q, dimension: Trip<Float>) -> Trip<Cart> {
 	// assumes a diagonal cell
 	let this = this.frac(dimension);
 	let that = that.frac(dimension);
-	let fdiff = reduce_pbc(this.sub_v(that)); // range [0, 1.]
-	let fdiff = fdiff.map(|Frac(x)| Frac(x.min(1. - x))); // range [0, 0.5]
+	let diff = this.sub_v(that)
+		.map(|Frac(x)| Frac(x - x.round())); // range [0.5, -0.5]
 
-	fdiff.map(|Frac(x)| assert!(0. <= x && x <= 0.5, "{} {:?} {:?}", x, this.map(|x| x.0), that.map(|x| x.0)));
-	fdiff.cart(dimension).sqnorm()
+	diff.map(|Frac(x)| assert!(-0.5-1e-5 <= x && x <= 0.5+1e-5));
+	diff.cart(dimension)
+}
+
+fn nearest_image_dist_sq<P:ToFrac,Q:ToFrac>(this: P, that: Q, dimension: Trip<Float>) -> Cart {
+	nearest_image_sub(this, that, dimension).sqnorm()
 }
 
 //--------------------
