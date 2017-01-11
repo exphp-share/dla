@@ -1,21 +1,21 @@
 
 // FIXME inconsistent usage of DIMENSION and state.dimension
 const DIMENSION: Trip<Float> = (100., 100., 6.);
-const NPARTICLE: usize = 100;
+const NPARTICLE: usize = 1;
 
 // VM: * Dimer sep should be 1.4 (Angstrom)
 //     * Interaction radius (to begin relaxation) should be 2
 
 // const CORE_RADIUS: Float = 5.0;
 // const INTRA_CHAIN_SEP: Cart = Cart(1.);
-const PARTICLE_RADIUS: Cart = Cart(1.);//Cart(0.4);
-const MOVE_RADIUS: Cart = Cart(1.);
-const DIMER_INITIAL_SEP: Cart = Cart(1.4);
-const HEX_INITIAL_RADIUS: Cart = Cart(0.5);
-// const RELAX_FREE_RADIUS: Cart = Cart(10.);
+const PARTICLE_RADIUS: Cart = 1.;//Cart(0.4);
+const MOVE_RADIUS: Cart = 1.;
+const DIMER_INITIAL_SEP: Cart = 1.4;
+const HEX_INITIAL_RADIUS: Cart = 0.5;
+// const RELAX_FREE_RADIUS: Cart = 10.;
 // const RELAX_NEIGHBORHOOD_FACTOR: f64 = 10.;
 
-const CART_ORIGIN: Trip<Cart> = (Cart(0.), Cart(0.), Cart(0.));
+const CART_ORIGIN: Trip<Cart> = (0., 0., 0.);
 // const FRAC_ORIGIN: Trip<Frac> = (Frac(0.), Frac(0.), Frac(0.));
 // const ORIGIN: Trip<Float> = (0., 0., 0.);
 
@@ -28,7 +28,7 @@ extern crate time;
 extern crate rand;
 #[macro_use(zip_with)]
 extern crate homogenous;
-#[macro_use(iproduct)]
+#[macro_use(iproduct,izip)]
 extern crate itertools;
 #[macro_use]
 extern crate newtype_ops;
@@ -64,7 +64,7 @@ type NaVector3 = na::Vector3<Float>;
 type NaPoint3 = na::Point3<Float>;
 
 fn identity() -> NaIso { NaIso::new(na::zero(), na::zero()) }
-fn translate((Cart(x),Cart(y),Cart(z)): Trip<Cart>) -> NaIso { NaIso::new(NaVector3{x:x,y:y,z:z}, na::zero()) }
+fn translate((x,y,z): Trip<Cart>) -> NaIso { NaIso::new(NaVector3{x:x,y:y,z:z}, na::zero()) }
 fn rotate((x,y,z): Trip<Float>) -> NaIso { NaIso::new(na::zero(), NaVector3{x:x,y:y,z:z}) }
 fn na_x(r: Float) -> NaVector3 { na::Vector3{x:r, ..na::zero()} }
 fn na_y(r: Float) -> NaVector3 { na::Vector3{y:r, ..na::zero()} }
@@ -91,7 +91,7 @@ struct Tree {
 // and maps the x unit vector away from its parent.
 fn bond_iso(pos: Trip<Cart>, parent: Trip<Cart>, dimension: Trip<Float>) -> NaIso {
 	// this implementation... is the result of pure trial and error.
-	let (x,y,z) = nearest_image_sub(pos, parent, dimension).map(|x| x.0);
+	let (x,y,z) = nearest_image_sub(pos, parent, dimension);
 
 	let beta = y.atan2(-z);
 	let na::Point3 {x,y,z} = identity().append_rotation(&na_x(-beta)) * na::Point3 { x:x, y:y, z:z };
@@ -112,7 +112,7 @@ fn bond_iso(pos: Trip<Cart>, parent: Trip<Cart>, dimension: Trip<Float>) -> NaIs
 
 impl Tree {
 	fn from_two(dimension: Trip<Float>, length: Cart, labels: (Label,Label)) -> Self {
-		Tree::from_two_pos(dimension, (CART_ORIGIN, (length, Cart(0.), Cart(0.))), labels)
+		Tree::from_two_pos(dimension, (CART_ORIGIN, (length, 0., 0.)), labels)
 	}
 	fn from_two_pos(dimension: Trip<Float>, pos: (Trip<Cart>, Trip<Cart>), labels: (Label,Label)) -> Self {
 		Tree {
@@ -135,20 +135,20 @@ impl Tree {
 		bond_iso(self.pos[index], self.pos[self.parents[index]], self.dimension)
 	}
 
-	fn attach_new(&mut self, parent: usize, label: Label, Cart(cart): Cart, beta: f64) -> usize {
+	fn attach_new(&mut self, parent: usize, label: Label, length: Cart, beta: f64) -> usize {
 		assert!(parent < self.len());
 
 		// NOTE: a.append_something(b) is defined to apply b after a, *chronologically* speaking.
 		// (i.e. reading the matrices right-to-left, assuming they operate on column vectors)
 		let iso = identity()
-			.append_translation(&na_x(cart))
+			.append_translation(&na_x(length))
 			.append_rotation(&na_y(60f64.to_radians()))
 			.append_rotation(&na_x(beta))
 			.append_transformation(&self.bond_iso(parent))
 			;
 		let na::Vector3 { x, y, z } = iso.translation;
 
-		self.attach_at(parent, label, (x,y,z).map(|x| Cart(x)))
+		self.attach_at(parent, label, (x,y,z))
 	}
 
 	fn attach_at(&mut self, parent: usize, label: Label, point: Trip<Cart>) -> usize {
@@ -171,7 +171,7 @@ impl Tree {
 			let tree_positions = self.pos.clone();
 
 			let (i_child, i_parent) = {
-				let mut best_dist = Cart(::std::f64::MAX);
+				let mut best_dist = ::std::f64::MAX;
 				let mut best_idxs = None;
 				for (i_child,&p) in new_pos.iter().enumerate() {
 					for (i_parent,&q) in tree_positions.iter().enumerate() {
@@ -201,7 +201,7 @@ impl Tree {
 		// NOTE: this subtly differs from the search in extend() in that we are now
 		//  seeking two different indices from the SAME iterable.
 		let (i, j) = {
-			let mut best_dist = Cart(::std::f64::MAX);
+			let mut best_dist = ::std::f64::MAX;
 			let mut best_idxs = None;
 			for i in 0..pos.len() {
 				for j in 0..i {
@@ -239,17 +239,19 @@ impl Tree {
 
 
 //--------------------
-// For statically proving that fractional/cartesian conversions are handled properly.
+// Make frac coords a newtype which is incompatible with other floats, to help prove that
+// fractional/cartesian conversions are handled properly.
 #[derive(Debug,PartialEq,PartialOrd,Copy,Clone)]
 pub struct Frac(Float);
-#[derive(Debug,PartialEq,PartialOrd,Copy,Clone)]
-pub struct Cart(Float);
-impl Frac { pub fn cart(self, dimension: Float) -> Cart { Cart(self.0*dimension) } }
-impl Cart { pub fn frac(self, dimension: Float) -> Frac { Frac(self.0/dimension) } }
+pub type Cart = Float;
+trait CartExt { fn frac(self, dimension: Float) -> Frac; }
+impl CartExt for Cart { fn frac(self, dimension: Float) -> Frac { Frac(self/dimension) } }
+
+impl Frac { pub fn cart(self, dimension: Float) -> Cart { self.0*dimension } }
 
 // add common binops to eliminate the majority of reasons I might need to
 // convert back into floats (which would render the type system useless)
-newtype_ops!{ {[Frac][Cart]} arithmetic {:=} {^&}Self {^&}{Self Float} }
+newtype_ops!{ [Frac] arithmetic {:=} {^&}Self {^&}{Self} }
 
 // cart() and frac() methods for triples
 trait ToCart { fn cart(self, dimension: Trip<Float>) -> Trip<Cart>; }
@@ -260,11 +262,11 @@ impl ToCart for Trip<Cart> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart>
 impl ToFrac for Trip<Frac> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { self } }
 
 // nalgebra interop, but strictly for cartesian
-fn to_na_vector((x,y,z): Trip<Cart>) -> na::Vector3<Float> { na::Vector3 { x: x.0, y: y.0, z: z.0 } }
-fn to_na_point((x,y,z): Trip<Cart>)  -> na::Point3<Float>  { na::Point3  { x: x.0, y: y.0, z: z.0 } }
+fn to_na_vector((x,y,z): Trip<Cart>) -> na::Vector3<Float> { na::Vector3 { x: x, y: y, z: z } }
+fn to_na_point((x,y,z): Trip<Cart>)  -> na::Point3<Float>  { na::Point3  { x: x, y: y, z: z } }
 
-fn from_na_vector(na::Vector3 {x,y,z}: na::Vector3<Float>) -> Trip<Cart> { (x,y,z).map(|x| Cart(x)) }
-fn from_na_point(na::Point3 {x,y,z}: na::Point3<Float>) -> Trip<Cart> { (x,y,z).map(|x| Cart(x)) }
+fn from_na_vector(na::Vector3 {x,y,z}: na::Vector3<Float>) -> Trip<Cart> { (x,y,z) }
+fn from_na_point(na::Point3 {x,y,z}: na::Point3<Float>) -> Trip<Cart> { (x,y,z) }
 
 fn reduce_pbc(this: Trip<Frac>) -> Trip<Frac> { this.map(|Frac(x)| Frac((x.fract() + 1.0).fract())) }
 fn nearest_image_sub<P:ToFrac,Q:ToFrac>(this: P, that: Q, dimension: Trip<Float>) -> Trip<Cart> {
@@ -445,7 +447,7 @@ impl State {
 		indices.into_iter()
 			.map(|i| (Some(i), nearest_image_dist_sq(point, self.positions[i], self.dimension)))
 			// locate tuple with minimum distance; unfortunately, Iterator::min_by is unstable.
-			.fold((None,Cart(std::f64::MAX)), |(i,p),(k,q)| if p < q { (i,p) } else { (k,q) })
+			.fold((None,std::f64::MAX), |(i,p),(k,q)| if p < q { (i,p) } else { (k,q) })
 			.0
 	}
 
@@ -480,7 +482,7 @@ where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Label> {
 	pos.resize(final_length, first);
 	writeln!(file, "{}", final_length);
 	writeln!(file, "blah blah blah");
-	for (label, (Cart(x),Cart(y),Cart(z))) in labels.into_iter().zip(pos) {
+	for (label, (x,y,z)) in labels.into_iter().zip(pos) {
 		writeln!(file, "{} {} {} {}", label, x, y, z);
 	}
 }
@@ -503,49 +505,19 @@ fn perp(a: Trip<f64>, b: Trip<f64>) -> Trip<f64> {
 	c
 }
 
-// Relaxes the last few atoms on the tree (which can safely be worked with without having
-// to unroot other atoms)
-fn relax_suffix_using_fire(mut tree: Tree, n_fixed: usize) -> Tree {
-	match n_fixed {
-		0 => { return relax_all_using_fire(tree); },
-		1 => { panic!("n_fixed == 1"); }, // a PITA edge case that's pointless anyways
-		n if n == tree.len() => { return tree; },
-		_ => {}
-	};
+fn straight_forward_force_writer(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>) -> ::sp2::Relax {
+	let (potential,force) = sp2::calc_potential_flat(md.position.clone(), dim);
 
-	let n_total = tree.len();
-	let mut fixed = vec![true; n_fixed];
-	fixed.resize(n_total, false);
+	// leave fixed atoms at 0 force; copy the others
+	md.force.resize(0, 0.);
+	md.force.resize(force.len(), 0.);
+	for i in free_indices {
+		md.force[3*i..3*(i+1)].copy_from_slice(&force[3*i..3*(i+1)]);
+	}
+	md
+}
 
-	let dim = tree.dimension;
-
-	let free_indices = n_fixed..fixed.len();
-	let free_indices_vec = free_indices.clone().collect_vec();
-	let n_free = free_indices.len();
-
-	// force computation works with [(f64,f64,f64)] and includes all positions;
-	// relaxation works with flattened [f64], and only includes free atoms.
-	let mut all_pos = tree.pos.iter().map(|&x| x.map(|x| x.0)).collect_vec();
-	let init_pos = all_pos[free_indices.clone()].iter().flat_map(|x| x.into_iter()).collect_vec();
-	let labels: Vec<_> = tree.labels[free_indices.clone()].to_vec();
-
-	assert!(init_pos.len() % 3 == 0, "{}", init_pos.len());
-	assert_eq!(init_pos.len() / 3 + n_fixed, fixed.len());
-
-	// FIXME pffft. All that work pulling this out, and now I'm just hardcoding two 
-	/*
-	let force_fn = |pos: Vec<f64>| {
-			assert_eq!(pos.len(), 3*n_free);
-			for i in 0..n_free {
-				all_pos[n_fixed+i] = (pos[3*i + 0], pos[3*i + 1], pos[3*i + 2]);
-			}
-			let (p,f) = sp2::calc_potential(all_pos.clone(), dim);
-			(p, f[free_indices.clone()].to_vec()
-				.into_iter().flat_map(|x| x.into_iter()).collect())
-		};
-	*/
-
-	let partners = tree.parents.to_vec();
+/*
 	let force_fn = |pos: Vec<f64>| {
 			assert_eq!(pos.len(), 3*n_free);
 			for i in 0..n_free {
@@ -560,7 +532,7 @@ fn relax_suffix_using_fire(mut tree: Tree, n_fixed: usize) -> Tree {
 				let ri = all_pos[i];
 				let rj = all_pos[j];
 
-				let dr = nearest_image_sub(ri.map(|x| Cart(x)), rj.map(|x| Cart(x)), dim).map(|x| x.0);
+				let dr = nearest_image_sub(ri, rj, dim);
 				let df = fi.sub_v(fj);
 
 				let fpar = par(df,dr);
@@ -572,40 +544,72 @@ fn relax_suffix_using_fire(mut tree: Tree, n_fixed: usize) -> Tree {
 //				};
 				force[i] = fi;
 				force[j] = fj;
+
+				// dubba check
+				let dr = nearest_image_sub(ri, rj, dim);
+				let df = fi.sub_v(fj);
+				assert!(dr.dot(df).abs() < 1e-8);
 			}
 
 			(potential, force[free_indices.clone()].to_vec()
 				.into_iter().flat_map(|x| x.into_iter()).collect())
-		};
+*/
+
+// Relaxes the last few atoms on the tree (which can safely be worked with without having
+// to unroot other atoms)
+fn relax_suffix_using_fire(mut tree: Tree, n_fixed: usize) -> Tree {
+	match n_fixed {
+		0 => { return relax_all_using_fire(tree); },
+		1 => { panic!("n_fixed == 1"); }, // a PITA edge case that's pointless anyways
+		n if n == tree.len() => { return tree; },
+		_ => {}
+	};
+
+	let free_indices = (n_fixed..tree.len()).collect_vec();
+
+	// force computation works with [(f64,f64,f64)] and includes all positions;
+	// relaxation works with flattened [f64], and... also now includes all positions.
+	let labels: Vec<_> = tree.labels[n_fixed..].to_vec();
 
 	// FIXME Params should not be in ::sp2
 	let params = ::sp2::Params {
-		timestep_start: 1e-5,
+		timestep_start: 1e-3,
 //		alpha_dec: 1.,
 //		alpha_max: 0.1,
-		timestep_max:   0.015,
+		timestep_max:   0.05,
 		force_tolerance: Some(1e-5),
 		step_limit: Some(4000),
 		..Default::default()
 	};
-	let pos = sp2::run_fire(&params, init_pos, force_fn);
 
 	let pos = {
-		let mut iter = pos.into_iter();
-		let mut out = vec![];
-		loop {
-			if let Some(x) = iter.next() {
-				let y = iter.next().unwrap();
-				let z = iter.next().unwrap();
-				out.push((Cart(x), Cart(y), Cart(z)));
-			} else { break }
-		}
-		out
+		let mut relax = sp2::Relax::init(params, flatten(&tree.pos.clone()));
+		let force_fn = |md| straight_forward_force_writer(md, &free_indices[..], tree.dimension);
+		relax.relax(force_fn)
 	};
 
-	for _ in free_indices.clone() { tree.pop(); }
+	let pos = unflatten(&pos)[n_fixed..].to_vec();
+
+	for _ in free_indices { tree.pop(); }
 	tree.extend(pos, labels);
 	tree
+}
+
+fn unflatten<T:Copy>(slice: &[T]) -> Vec<(T,T,T)> {
+	let mut iter = slice.iter().cloned();
+	let mut out = vec![];
+	loop {
+		if let Some(x) = iter.next() {
+			let y = iter.next().unwrap();
+			let z = iter.next().unwrap();
+			out.push((x, y, z));
+		} else { break }
+	}
+	out
+}
+
+fn flatten<T:Copy>(slice: &[(T,T,T)]) -> Vec<T> {
+	slice.iter().cloned().flat_map(|x| x.into_iter()).collect()
 }
 
 //---------- DLA
@@ -618,7 +622,7 @@ fn random_direction<R:Rng>(rng: &mut R) -> Trip<Cart> {
 
 	let vec = (x,y,z);
 	let length = vec.sqnorm().sqrt();
-	vec.map(|x| Cart(x / length))
+	vec.map(|x| x / length)
 }
 
 fn random_border_position<R:Rng>(rng: &mut R) -> Trip<Frac> {
@@ -688,7 +692,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
 	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
 	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
-	tree.transform_mut(translate(dimension.map(|d| Cart(d*0.5))));
+	tree.transform_mut(translate(dimension.mul_s(0.5)));
 
 	let Tree { pos, labels, dimension, .. } = tree;
 	let pos = sp2::relax_all(pos, dimension);
@@ -696,7 +700,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 }
 
 fn center(pos: &Vec<Trip<Cart>>) -> Trip<Cart> {
-	let n = Cart(pos.len() as Float);
+	let n = pos.len() as Cart;
 	pos.iter().fold(CART_ORIGIN, |u,&b| u.add_v(b)).div_s(n)
 }
 
@@ -767,7 +771,7 @@ fn dla_run() -> Tree {
 
 	let mut rng = rand::weak_rng();
 
-	let nbr_radius = Cart(1.)*MOVE_RADIUS + PARTICLE_RADIUS;
+	let nbr_radius = MOVE_RADIUS + PARTICLE_RADIUS;
 
 	let mut timer = Timer::new(30);
 
