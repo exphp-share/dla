@@ -159,73 +159,6 @@ impl Tree {
 		self.pos.len()-1
 	}
 
-	fn extend<I:IntoIterator<Item=Label>, J: IntoIterator<Item=Trip<Cart>>>(&mut self, new_pos: J, new_labels: I) {
-		let mut new_labels = new_labels.into_iter().collect_vec();
-		let mut new_pos = new_pos.into_iter().collect_vec();
-		assert_eq!(new_labels.len(), new_pos.len());
-
-		// extend the tree greedily a la prim's algorithm
-		// NOTE: brute force implementation
-		while !new_pos.is_empty() {
-
-			let tree_positions = self.pos.clone();
-
-			let (i_child, i_parent) = {
-				let mut best_dist = ::std::f64::MAX;
-				let mut best_idxs = None;
-				for (i_child,&p) in new_pos.iter().enumerate() {
-					for (i_parent,&q) in tree_positions.iter().enumerate() {
-						let sqdist = nearest_image_dist_sq(p,q,self.dimension);
-						if sqdist < best_dist {
-							best_dist = sqdist;
-							best_idxs = Some((i_child,i_parent));
-						}
-					}
-				}
-				best_idxs
-			}.unwrap(); // tree and new_pos each have at least one node
-
-			let label = new_labels.remove(i_child);
-			let point = new_pos.remove(i_child);
-			self.attach_at(i_parent, label, point);
-		}
-	}
-
-	fn from_iter<I:IntoIterator<Item=Label>, J: IntoIterator<Item=Trip<Cart>>>(dimension: Trip<Float>, pos: J, labels: I) -> Self {
-		let mut labels = labels.into_iter().collect_vec();
-		let mut pos = pos.into_iter().collect_vec();
-		assert_eq!(labels.len(), pos.len());
-		assert!(pos.len() >= 2);
-
-		// find a minimum weight edge
-		// NOTE: this subtly differs from the search in extend() in that we are now
-		//  seeking two different indices from the SAME iterable.
-		let (i, j) = {
-			let mut best_dist = ::std::f64::MAX;
-			let mut best_idxs = None;
-			for i in 0..pos.len() {
-				for j in 0..i {
-					let sqdist = nearest_image_dist_sq(pos[i],pos[j],dimension);
-					if sqdist < best_dist {
-						best_dist = sqdist;
-						best_idxs = Some((i,j));
-					}
-				}
-			}
-			best_idxs
-		}.unwrap(); // there are at least two nodes
-
-		assert!(i > j);
-		let label_1 = labels.remove(i);
-		let label_2 = labels.remove(j);
-		let pos_1 = pos.remove(i);
-		let pos_2 = pos.remove(j);
-
-		let mut tree = Tree::from_two_pos(dimension, (pos_1, pos_2), (label_1, label_2));
-		tree.extend(pos, labels);
-		tree
-	}
-
 	// FIXME hack
 	fn pop(&mut self) -> Option<(Label, usize, Trip<Cart>)> {
 		assert!(self.len() > 2); // can't remove second atom, because the first points to it
@@ -234,6 +167,14 @@ impl Tree {
 			let pos = self.pos.pop().unwrap();
 			(label, parent, pos)
 		})
+	}
+
+	// Reassigns positions without regenerating tree structure,
+	//  assuming that the old bonds are still valid.
+	fn dangerously_reassign_positions(&mut self, pos: Vec<Trip<Cart>>) {
+		// (this method only exists for emphasis; self.pos is actually visible at the callsite)
+		assert_eq!(pos.len(), self.pos.len());
+		self.pos = pos;
 	}
 }
 
@@ -392,45 +333,6 @@ impl State {
 		self.labels.push(label);
 
 		zip_with!((point, self.sorted.as_mut()) |x, set| set.insert_images(x, i));
-	}
-
-	// returns neighborhood size for debug info
-	fn relax_neighborhood(&mut self, center: Trip<Frac>, radius: Cart) -> usize {
-		let mut fixed = vec![true; self.positions.len()];
-		for i in self.neighborhood(center, radius) {
-			if self.labels[i] != LABEL_SILICON {
-				fixed[i] = false;
-			}
-		}
-
-		let n_free = fixed.iter().filter(|&x| !x).count();
-
-		let State { ref mut positions, ref mut sorted, dimension, .. } = *self;
-
-		*positions = sp2::relax(positions.clone(), fixed, (0.,0.,0.));// dimension); // FIXME
-
-		// Relaxation is infrequent; we shall just rebuild the index lists from scratch.
-		sorted.as_mut().enumerate().map(|(axis, set)| {
-			let projected: Vec<_> = positions.iter()
-				.map(|&x| reduce_pbc(x.frac(dimension)))
-				.map(|x| x.into_nth(axis))
-				.collect();
-			*set = SortedIndices::rebuild(projected);
-		});
-
-		n_free
-	}
-
-	fn extend_and_relax<P:ToFrac,I:IntoIterator<Item=P>>(&mut self, iter: I) {
-		let mut fixed = vec![true; self.positions.len()];
-		for p in iter {
-			let dim = self.dimension;
-			self.insert(LABEL_CARBON, reduce_pbc(p.frac(dim)))
-		}
-		fixed.resize(self.positions.len(), false);
-
-		let tmp = self.positions.clone();
-		self.positions = sp2::relax(tmp, fixed, (0.,0.,self.dimension.2));
 	}
 
 	fn cursor_neighborhood(&self) -> Vec<usize> {
@@ -601,10 +503,7 @@ fn relax_suffix_using_fire(mut tree: Tree, n_fixed: usize) -> Tree {
 		relax.relax(force_fn)
 	};
 
-	let pos = unflatten(&pos)[n_fixed..].to_vec();
-
-	for _ in free_indices { tree.pop(); }
-	tree.extend(pos, labels);
+	tree.dangerously_reassign_positions(unflatten(&pos));
 	tree
 }
 
@@ -707,9 +606,9 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
 
-	let Tree { pos, labels, dimension, .. } = tree;
-	let pos = sp2::relax_all(pos, dimension);
-	Tree::from_iter(dimension, pos, labels)
+	let pos = sp2::relax_all(tree.pos.clone(), dimension);
+	tree.dangerously_reassign_positions(pos);
+	tree
 }
 
 fn center(pos: &Vec<Trip<Cart>>) -> Trip<Cart> {
@@ -774,9 +673,6 @@ fn test_outputs() {
 
 	let tree = squiggle_nucleus(DIMENSION);
 	doit(tree.clone(), "squiggle.xyz");
-	let Tree { dimension, labels, pos, .. } = tree;
-	let tree = Tree::from_iter(dimension, pos, labels);
-	doit(tree, "squiggle-rebuild.xyz");
 }
 
 fn dla_run() -> Tree {
