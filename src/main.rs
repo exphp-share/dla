@@ -34,6 +34,7 @@ extern crate itertools;
 extern crate newtype_ops;
 extern crate dla_sys;
 extern crate libc;
+extern crate num;
 extern crate nalgebra;
 
 
@@ -484,6 +485,73 @@ where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Label> {
 	}
 }
 
+//---------------------------
+
+fn relax_using_fire(mut tree: Tree, fixed: Vec<bool>) -> Tree {
+	// NOTE: no ability yet to remove something from the middle of the dependency tree.
+	// Hence we require at least two fixed, and all free atoms at end.
+	assert!(fixed[0]);
+	assert!(fixed[1]);
+	assert!(fixed.iter().skip_while(|&&x| x).all(|&x| !x));
+	assert_eq!(fixed.len(), tree.len());
+	let dim = tree.dimension;
+
+	let n_fixed = fixed.iter().position(|&x| !x);
+	let n_fixed = match n_fixed { Some(x) => x, None => return tree };
+
+	let free_indices = n_fixed..fixed.len();
+	let free_indices_vec = free_indices.clone().collect_vec();
+	let n_free = free_indices.len();
+
+	// force computation works with [(f64,f64,f64)] and includes all positions;
+	// relaxation works with flattened [f64], and only includes free atoms.
+	let mut all_pos = tree.pos.iter().map(|&x| x.map(|x| x.0)).collect_vec();
+	let init_pos = all_pos[free_indices.clone()].iter().flat_map(|x| x.into_iter()).collect_vec();
+	let labels: Vec<_> = tree.labels[free_indices.clone()].to_vec();
+
+	assert!(init_pos.len() % 3 == 0, "{}", init_pos.len());
+	assert_eq!(init_pos.len() / 3 + n_fixed, fixed.len());
+
+	let force_fn = |pos: Vec<f64>| {
+		assert_eq!(pos.len(), 3*n_free);
+		for i in 0..n_free {
+			all_pos[n_fixed+i] = (pos[3*i + 0], pos[3*i + 1], pos[3*i + 2]);
+		}
+		let (p,f) = sp2::calc_potential(all_pos.clone(), dim);
+		(p, f[free_indices.clone()].to_vec()
+			.into_iter().flat_map(|x| x.into_iter()).collect())
+	};
+
+	// FIXME Params should not be in ::sp2
+	let params = ::sp2::Params {
+		timestep_start: 1e-5,
+//		alpha_dec: 1.,
+//		alpha_max: 0.1,
+		timestep_max:   0.015,
+		force_tolerance: Some(1e-5),
+		step_limit: Some(4000),
+		..Default::default()
+	};
+	let pos = sp2::run_fire(&params, init_pos, force_fn);
+
+	let pos = {
+		let mut iter = pos.into_iter();
+		let mut out = vec![];
+		loop {
+			if let Some(x) = iter.next() {
+				let y = iter.next().unwrap();
+				let z = iter.next().unwrap();
+				out.push((Cart(x), Cart(y), Cart(z)));
+			} else { break }
+		}
+		out
+	};
+
+	for _ in free_indices.clone() { tree.pop(); }
+	tree.extend(pos, labels);
+	tree
+}
+
 //---------- DLA
 
 fn random_direction<R:Rng>(rng: &mut R) -> Trip<Cart> {
@@ -683,14 +751,15 @@ fn dla_run() -> Tree {
 			let mut fixed = vec![true; n_fixed];
 			fixed.resize(n_total, false);
 
-			let relaxed = sp2::relax(unrelaxed, fixed, state.dimension);
+//			let relaxed = sp2::relax(unrelaxed, fixed, state.dimension);
 
-			// Replace positions in tree through even more terrible hax
-			let new_labels = tree.labels[n_fixed..].to_vec();
-			let new_pos    = relaxed[n_fixed..].to_vec();
-			tree.pop().unwrap();
-			tree.pop().unwrap();
-			tree.extend(new_pos, new_labels);
+////			// Replace positions in tree through even more terrible hax
+//			let new_labels = tree.labels[n_fixed..].to_vec();
+//			let new_pos    = relaxed[n_fixed..].to_vec();
+//			tree.pop().unwrap();
+//			tree.pop().unwrap();
+//			tree.extend(new_pos, new_labels);
+			tree = relax_using_fire(tree, fixed);
 		}
 
 		// debugging info
