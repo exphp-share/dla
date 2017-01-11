@@ -487,17 +487,37 @@ where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Label> {
 
 //---------------------------
 
-fn relax_using_fire(mut tree: Tree, fixed: Vec<bool>) -> Tree {
-	// NOTE: no ability yet to remove something from the middle of the dependency tree.
-	// Hence we require at least two fixed, and all free atoms at end.
-	assert!(fixed[0]);
-	assert!(fixed[1]);
-	assert!(fixed.iter().skip_while(|&&x| x).all(|&x| !x));
-	assert_eq!(fixed.len(), tree.len());
-	let dim = tree.dimension;
+fn relax_all_using_fire(mut tree: Tree) -> Tree {
+	unimplemented!()
+}
 
-	let n_fixed = fixed.iter().position(|&x| !x);
-	let n_fixed = match n_fixed { Some(x) => x, None => return tree };
+// part of a that is parallel to b
+fn par(a: Trip<f64>, b: Trip<f64>) -> Trip<f64> {
+	let b_norm = b.dot(b).sqrt();
+	let b_unit = b.div_s(b_norm);
+	b_unit.mul_s(a.dot(b_unit))
+}
+fn perp(a: Trip<f64>, b: Trip<f64>) -> Trip<f64> {
+	let c = a.sub_v(par(a,b));
+	assert!(c.dot(a).abs() <= 1e-7);
+	c
+}
+
+// Relaxes the last few atoms on the tree (which can safely be worked with without having
+// to unroot other atoms)
+fn relax_suffix_using_fire(mut tree: Tree, n_fixed: usize) -> Tree {
+	match n_fixed {
+		0 => { return relax_all_using_fire(tree); },
+		1 => { panic!("n_fixed == 1"); }, // a PITA edge case that's pointless anyways
+		n if n == tree.len() => { return tree; },
+		_ => {}
+	};
+
+	let n_total = tree.len();
+	let mut fixed = vec![true; n_fixed];
+	fixed.resize(n_total, false);
+
+	let dim = tree.dimension;
 
 	let free_indices = n_fixed..fixed.len();
 	let free_indices_vec = free_indices.clone().collect_vec();
@@ -512,15 +532,51 @@ fn relax_using_fire(mut tree: Tree, fixed: Vec<bool>) -> Tree {
 	assert!(init_pos.len() % 3 == 0, "{}", init_pos.len());
 	assert_eq!(init_pos.len() / 3 + n_fixed, fixed.len());
 
+	// FIXME pffft. All that work pulling this out, and now I'm just hardcoding two 
+	/*
 	let force_fn = |pos: Vec<f64>| {
-		assert_eq!(pos.len(), 3*n_free);
-		for i in 0..n_free {
-			all_pos[n_fixed+i] = (pos[3*i + 0], pos[3*i + 1], pos[3*i + 2]);
-		}
-		let (p,f) = sp2::calc_potential(all_pos.clone(), dim);
-		(p, f[free_indices.clone()].to_vec()
-			.into_iter().flat_map(|x| x.into_iter()).collect())
-	};
+			assert_eq!(pos.len(), 3*n_free);
+			for i in 0..n_free {
+				all_pos[n_fixed+i] = (pos[3*i + 0], pos[3*i + 1], pos[3*i + 2]);
+			}
+			let (p,f) = sp2::calc_potential(all_pos.clone(), dim);
+			(p, f[free_indices.clone()].to_vec()
+				.into_iter().flat_map(|x| x.into_iter()).collect())
+		};
+	*/
+
+	let partners = tree.parents.to_vec();
+	let force_fn = |pos: Vec<f64>| {
+			assert_eq!(pos.len(), 3*n_free);
+			for i in 0..n_free {
+				all_pos[n_fixed+i] = (pos[3*i + 0], pos[3*i + 1], pos[3*i + 2]);
+			}
+			let (potential,mut force) = sp2::calc_potential(all_pos.clone(), dim);
+
+			for i in n_fixed..n_total {
+				let j = partners[i];
+				let fi = force[i];
+				let fj = if j >= n_fixed { force[j] } else { (0.,0.,0.) };
+				let ri = all_pos[i];
+				let rj = all_pos[j];
+
+				let dr = nearest_image_sub(ri.map(|x| Cart(x)), rj.map(|x| Cart(x)), dim).map(|x| x.0);
+				let df = fi.sub_v(fj);
+
+				let fpar = par(df,dr);
+
+				let (fi,fj) = //if j < n_fixed {
+					(fi.sub_v(fpar), fj);
+//				} else {
+//					(fi.sub_v(fpar.mul_s(0.5)), fj.add_v(fpar.mul_s(0.5)))
+//				};
+				force[i] = fi;
+				force[j] = fj;
+			}
+
+			(potential, force[free_indices.clone()].to_vec()
+				.into_iter().flat_map(|x| x.into_iter()).collect())
+		};
 
 	// FIXME Params should not be in ::sp2
 	let params = ::sp2::Params {
@@ -748,18 +804,8 @@ fn dla_run() -> Tree {
 			let unrelaxed = tree.pos.clone();
 			let n_total = unrelaxed.len();
 			let n_fixed = n_total - n_free;
-			let mut fixed = vec![true; n_fixed];
-			fixed.resize(n_total, false);
 
-//			let relaxed = sp2::relax(unrelaxed, fixed, state.dimension);
-
-////			// Replace positions in tree through even more terrible hax
-//			let new_labels = tree.labels[n_fixed..].to_vec();
-//			let new_pos    = relaxed[n_fixed..].to_vec();
-//			tree.pop().unwrap();
-//			tree.pop().unwrap();
-//			tree.extend(new_pos, new_labels);
-			tree = relax_using_fire(tree, fixed);
+			tree = relax_suffix_using_fire(tree, n_fixed);
 		}
 
 		// debugging info

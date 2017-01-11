@@ -161,19 +161,6 @@ impl<F:Float> Default for Params<F> {
 }
 
 
-// part of a that is parallel to b
-fn par(a: Trip<Cart>, b: Trip<Cart>) -> Trip<Cart> {
-	let b_norm = Cart(b.dot(b).0.sqrt());
-	let b_unit = b.div_s(b_norm);
-	b_unit.mul_s(a.dot(b_unit))
-}
-// part of a that is perpendicular to b
-fn perp(a: Trip<Cart>, b: Trip<Cart>) -> Trip<Cart> {
-	let c = a.sub_v(par(a,b));
-	assert!(Cart(c.dot(a).0.abs()) <= Cart(1e-7));
-	c
-}
-
 pub struct MdInput<F>  { pub position: Vec<F>, pub velocity: Vec<F>, pub timestep: F }
 pub struct MdOutput<F> { pub position: Vec<F>, pub velocity: Vec<F>, pub force: Vec<F>, pub potential: F }
 
