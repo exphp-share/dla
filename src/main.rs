@@ -517,43 +517,56 @@ fn straight_forward_force_writer(mut md: ::sp2::Relax, free_indices: &[usize], d
 	md
 }
 
-/*
-	let force_fn = |pos: Vec<f64>| {
-			assert_eq!(pos.len(), 3*n_free);
-			for i in 0..n_free {
-				all_pos[n_fixed+i] = (pos[3*i + 0], pos[3*i + 1], pos[3*i + 2]);
-			}
-			let (potential,mut force) = sp2::calc_potential(all_pos.clone(), dim);
+fn cancel_something(something: &mut [f64], positions: &[f64], free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) {
+	assert_eq!(parents.len() * 3, positions.len());
+	assert_eq!(parents.len() * 3, something.len());
 
-			for i in n_fixed..n_total {
-				let j = partners[i];
-				let fi = force[i];
-				let fj = if j >= n_fixed { force[j] } else { (0.,0.,0.) };
-				let ri = all_pos[i];
-				let rj = all_pos[j];
+	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
+	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
 
-				let dr = nearest_image_sub(ri, rj, dim);
-				let df = fi.sub_v(fj);
+	// verify dependencies are in order (parents before children)
+	for (ii,&i) in free_indices.iter().enumerate() {
+		if let Some(jj) = free_indices.iter().position(|&x| x == parents[i]) {
+			assert!(ii > jj);
+		}
+	}
 
-				let fpar = par(df,dr);
+	for &i in free_indices {
+		let j = parents[i];
 
-				let (fi,fj) = //if j < n_fixed {
-					(fi.sub_v(fpar), fj);
-//				} else {
-//					(fi.sub_v(fpar.mul_s(0.5)), fj.add_v(fpar.mul_s(0.5)))
-//				};
-				force[i] = fi;
-				force[j] = fj;
+		let fi = tup3(something, i);
+		let fj = tup3(something, j);
+		let ri = tup3(positions, i);
+		let rj = tup3(positions, j);
+		let dr = nearest_image_sub(ri, rj, dim);
+		let df = fi.sub_v(fj);
 
-				// dubba check
-				let dr = nearest_image_sub(ri, rj, dim);
-				let df = fi.sub_v(fj);
-				assert!(dr.dot(df).abs() < 1e-8);
-			}
+		let fpar = par(df,dr);
 
-			(potential, force[free_indices.clone()].to_vec()
-				.into_iter().flat_map(|x| x.into_iter()).collect())
-*/
+		let (fi,fj) = (fi.sub_v(fpar), fj);
+		tup3set(something, i, fi);
+		tup3set(something, j, fj);
+
+		// dubba check
+		let fi = tup3(something, i);
+		let fj = tup3(something, j);
+		let dr = nearest_image_sub(ri, rj, dim);
+		let df = fi.sub_v(fj);
+		assert!(dr.dot(df).abs() < 1e-8);
+	}
+}
+
+fn force_canceling_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> ::sp2::Relax {
+	let mut md = straight_forward_force_writer(md, free_indices, dim);
+	cancel_something(&mut md.force, &md.position, free_indices, dim, parents);
+	md
+}
+
+fn velocity_canceling_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> ::sp2::Relax {
+	let mut md = straight_forward_force_writer(md, free_indices, dim);
+	cancel_something(&mut md.velocity, &md.position, free_indices, dim, parents);
+	md
+}
 
 // Relaxes the last few atoms on the tree (which can safely be worked with without having
 // to unroot other atoms)
