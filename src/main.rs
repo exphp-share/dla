@@ -1,7 +1,11 @@
 
 // FIXME inconsistent usage of DIMENSION and state.dimension
-const DIMENSION: Trip<Float> = (100., 100., 6.);
-const NPARTICLE: usize = 1;
+const DIMENSION: Trip<Float> = (100., 6., 100.);
+const NPARTICLE: usize = 100;
+
+const THETA_STRENGTH:  Float = 1000.;
+const RADIUS_STRENGTH: Float = 1000.;
+const TARGET_RADIUS: Float = 1.4;
 
 // VM: * Dimer sep should be 1.4 (Angstrom)
 //     * Interaction radius (to begin relaxation) should be 2
@@ -19,9 +23,209 @@ const CART_ORIGIN: Trip<Cart> = (0., 0., 0.);
 // const FRAC_ORIGIN: Trip<Frac> = (Frac(0.), Frac(0.), Frac(0.));
 // const ORIGIN: Trip<Float> = (0., 0., 0.);
 
-// const THETA_STRENGTH: Float = 1.0;
-// const RADIUS_STRENGTH: Float = 1.0;
 // const TARGET_RADIUS: Float = 1.0;
+
+fn main() {
+//	test_outputs();
+//	dla_run_test(Dee::Two);
+	dla_run(Dee::Three);
+}
+
+fn dla_run(dee: Dee) -> Tree {
+	let mut tree = hexagon_nucleus(DIMENSION);
+
+	let mut rng = rand::weak_rng();
+
+	let nbr_radius = MOVE_RADIUS + PARTICLE_RADIUS;
+
+	let mut timer = Timer::new(30);
+
+	let final_particles = 2*NPARTICLE + tree.len();
+
+	for n in 0..NPARTICLE {
+		write!(stderr(), "Particle {:8} of {:8}: ", n, NPARTICLE).unwrap();
+
+		let mut state = State::from_positions(DIMENSION, tree.pos.clone().into_iter().zip(tree.labels.clone()));
+
+		let mut pos = random_border_position(&mut rng);
+
+		// move until ready to place
+		while state.neighborhood(pos, nbr_radius).is_empty() {
+			//writeln!(stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
+			//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
+
+			let disp = random_direction(&mut rng)
+				.mul_s(MOVE_RADIUS).frac(state.dimension);
+
+			pos = reduce_pbc(pos.add_v(disp));
+
+			if dee == Dee::Two { pos.1 = Frac(0.5); }
+		}
+
+		{ // make the two angles random
+			let i = state.closest_neighbor(pos, nbr_radius).unwrap();
+			let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+			let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+		}
+
+		// HACK to get relaxed positions, ignoring the code in state
+		// (tbh neighbor finding and relaxation should be separated out of state)
+		let mut n_free = 2;
+		{
+			let unrelaxed = tree.pos.clone();
+			let n_total = unrelaxed.len();
+
+			let n_fixed = n_total - n_free;
+
+			tree = relax_suffix_using_fire(tree, n_fixed);
+		}
+
+		// debugging info
+		timer.push();
+		writeln!(stderr(), "({:22},{:22},{:22})  ({:8?} ms)  (avg: {:8?} ms)  (relaxed {:3})",
+			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free
+		).unwrap();
+
+		write_xyz(&mut stdout(), &tree, final_particles);
+	}
+
+	{
+		let dimension = tree.dimension;
+		let pos = tree.pos.clone().into_iter().map(|x| reduce_pbc(x.frac(dimension)).cart(dimension));
+		write_xyz_(&mut stdout(), pos, tree.labels.clone(), final_particles);
+	}
+	assert_eq!(final_particles, tree.len());
+	tree
+}
+
+fn dla_run_test(dee: Dee) -> Tree {
+	let mut tree = one_dimer(DIMENSION);
+
+	let mut rng = rand::weak_rng();
+
+	let nbr_radius = MOVE_RADIUS + PARTICLE_RADIUS;
+
+	let mut timer = Timer::new(30);
+
+	let final_particles = 4;
+
+	for n in 0..1 {
+		let mut state = State::from_positions(DIMENSION, tree.pos.clone().into_iter().zip(tree.labels.clone()));
+
+		let mut pos = random_border_position(&mut rng);
+
+		// move until ready to place
+		while state.neighborhood(pos, nbr_radius).is_empty() {
+			//writeln!(stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
+			//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
+
+			let disp = random_direction(&mut rng)
+				.mul_s(MOVE_RADIUS).frac(state.dimension);
+
+			pos = reduce_pbc(pos.add_v(disp));
+
+			if dee == Dee::Two { pos.1 = Frac(0.5); }
+		}
+
+		{ // make the two angles random
+			let i = state.closest_neighbor(pos, nbr_radius).unwrap();
+			let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+			let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+		}
+
+		// HACK to get relaxed positions, ignoring the code in state
+		// (tbh neighbor finding and relaxation should be separated out of state)
+		let n_free = 2;
+		{
+			let unrelaxed = tree.pos.clone();
+			let n_total = unrelaxed.len();
+			let n_fixed = n_total - n_free;
+
+			writeln!(stderr(), "{:?}", distances_from_tree(&tree));
+
+			let oldf = ::sp2::calc_potential(tree.pos.clone(), tree.dimension).1;
+			let oldx = tree.pos.clone();
+			tree = relax_suffix_using_fire(tree, 2);
+			let newf = ::sp2::calc_potential(tree.pos.clone(), tree.dimension).1;
+			let newx = tree.pos.clone();
+
+			for (u,v) in izip!(oldf,newf) {
+				let u = u.map(|x| (x*1000.).round()/1000.);
+				let v = v.map(|x| (x*1000.).round()/1000.);
+				writeln!(stderr(), "FORCE {:?} -> {:?}", u, v);
+			}
+			for (u,v) in izip!(oldx,newx) {
+				let u = u.map(|x| (x*1000.).round()/1000.);
+				let v = v.map(|x| (x*1000.).round()/1000.);
+				writeln!(stderr(), "POS   {:?} -> {:?}", u, v);
+			}
+			writeln!(stderr(), "{:?}", distances_from_tree(&tree));
+		}
+
+		write_xyz(&mut stdout(), &tree, final_particles);
+	}
+
+	{
+		let dimension = tree.dimension;
+		let pos = tree.pos.clone().into_iter().map(|x| reduce_pbc(x.frac(dimension)).cart(dimension));
+		write_xyz_(&mut stdout(), pos, tree.labels.clone(), final_particles);
+	}
+	assert_eq!(final_particles, tree.len());
+	tree
+}
+
+// Relaxes the last few atoms on the tree (which can safely be worked with without having
+// to unroot other atoms)
+fn relax_suffix_using_fire(mut tree: Tree, n_fixed: usize) -> Tree {
+	match n_fixed {
+		0 => { return relax_all_using_fire(tree); },
+		1 => { panic!("n_fixed == 1"); }, // a PITA edge case that's pointless anyways
+		n if n == tree.len() => { return tree; },
+		_ => {}
+	};
+
+	let free_indices = (n_fixed..tree.len()).collect_vec();
+
+	// force computation works with [(f64,f64,f64)] and includes all positions;
+	// relaxation works with flattened [f64], and... also now includes all positions.
+	let labels: Vec<_> = tree.labels[n_fixed..].to_vec();
+
+	// FIXME Params should not be in ::sp2
+	let params = ::sp2::Params {
+		timestep_start: 1e-3,
+		timestep_max:   0.05,
+		force_tolerance: Some(1e-5),
+		step_limit: Some(4000),
+	//	timestep_max:   1e-6,
+	//	timestep_start: 1e-6,
+	//	force_tolerance: Some(1e-7),
+	//	step_limit: Some(40000),
+		..Default::default()
+	};
+
+	let pos = {
+		let mut relax = sp2::Relax::init(params, flatten(&tree.pos.clone()));
+		//let force_fn = |md| just_write_forces(md, &free_indices[..], tree.dimension);
+		//let force_fn = |md| force_canceling_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..]);
+		//let force_fn = |md| centripetal_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..]);
+		//let force_fn = |md| velocity_canceling_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..]);
+		//let force_fn = |md| radius_resetting_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..], 1.41);
+		//let force_fn = |md| cone_adjusting_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..], 1.41);
+		//let force_fn = |md| zero_forces(md);
+		let force_fn = |md| new_writer(md, &free_indices[..], tree.dimension, &tree.parents[..], RADIUS_STRENGTH, THETA_STRENGTH, TARGET_RADIUS);
+		relax.relax(force_fn)
+	};
+
+	tree.dangerously_reassign_positions(unflatten(&pos));
+
+	for p in &mut tree.pos {
+		*p = reduce_pbc((*p).frac(tree.dimension)).cart(tree.dimension)
+	}
+
+	tree
+}
+
+
 
 // what a mess I've made; how did we accumulate so many dependencies? O_o
 extern crate time;
@@ -66,6 +270,9 @@ type NaPoint3 = na::Point3<Float>;
 fn identity() -> NaIso { NaIso::new(na::zero(), na::zero()) }
 fn translate((x,y,z): Trip<Cart>) -> NaIso { NaIso::new(NaVector3{x:x,y:y,z:z}, na::zero()) }
 fn rotate((x,y,z): Trip<Float>) -> NaIso { NaIso::new(na::zero(), NaVector3{x:x,y:y,z:z}) }
+fn rotate_x(x: Float) -> NaIso { NaIso::new(na::zero(), na_x(x)) }
+fn rotate_y(x: Float) -> NaIso { NaIso::new(na::zero(), na_y(x)) }
+fn rotate_z(x: Float) -> NaIso { NaIso::new(na::zero(), na_z(x)) }
 fn na_x(r: Float) -> NaVector3 { na::Vector3{x:r, ..na::zero()} }
 fn na_y(r: Float) -> NaVector3 { na::Vector3{y:r, ..na::zero()} }
 fn na_z(r: Float) -> NaVector3 { na::Vector3{z:r, ..na::zero()} }
@@ -91,6 +298,8 @@ struct Tree {
 // and maps the x unit vector away from its parent.
 fn bond_iso(pos: Trip<Cart>, parent: Trip<Cart>, dimension: Trip<Float>) -> NaIso {
 	// this implementation... is the result of pure trial and error.
+	// FIXME it is also wrong, as evidenced by the need for various hax in
+	//       the angle-based potential (add_theta_terms)
 	let (x,y,z) = nearest_image_sub(pos, parent, dimension);
 
 	let beta = y.atan2(-z);
@@ -159,18 +368,8 @@ impl Tree {
 		self.pos.len()-1
 	}
 
-	// FIXME hack
-	fn pop(&mut self) -> Option<(Label, usize, Trip<Cart>)> {
-		assert!(self.len() > 2); // can't remove second atom, because the first points to it
-		self.labels.pop().map(|label| {
-			let parent = self.parents.pop().unwrap();
-			let pos = self.pos.pop().unwrap();
-			(label, parent, pos)
-		})
-	}
-
-	// Reassigns positions without regenerating tree structure,
-	//  assuming that the old bonds are still valid.
+	// Reassigns positions without regenerating tree structure.
+	// The old bonds must remain valid.
 	fn dangerously_reassign_positions(&mut self, pos: Vec<Trip<Cart>>) {
 		// (this method only exists for emphasis; self.pos is actually visible at the callsite)
 		assert_eq!(pos.len(), self.pos.len());
@@ -403,16 +602,20 @@ fn par(a: Trip<f64>, b: Trip<f64>) -> Trip<f64> {
 }
 fn perp(a: Trip<f64>, b: Trip<f64>) -> Trip<f64> {
 	let c = a.sub_v(par(a,b));
-	assert!(c.dot(a).abs() <= 1e-7);
+	assert!(c.dot(b).abs() <= 1e-4 * c.dot(c).abs(), "{:?} {:?}", c.dot(c), c.dot(b));
 	c
 }
 
-fn straight_forward_force_writer(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>) -> ::sp2::Relax {
+fn zero_forces(mut md: ::sp2::Relax) -> ::sp2::Relax {
+	md.force.resize(0, 0.);
+	md.force.resize(md.position.len(), 0.);
+	md
+}
+
+fn just_write_forces(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>) -> ::sp2::Relax {
 	let (potential,force) = sp2::calc_potential_flat(md.position.clone(), dim);
 
-	// leave fixed atoms at 0 force; copy the others
-	md.force.resize(0, 0.);
-	md.force.resize(force.len(), 0.);
+	let mut md = zero_forces(md);
 	for i in free_indices {
 		md.force[3*i..3*(i+1)].copy_from_slice(&force[3*i..3*(i+1)]);
 	}
@@ -443,9 +646,13 @@ fn cancel_something(something: &mut [f64], positions: &[f64], free_indices: &[us
 		let dr = nearest_image_sub(ri, rj, dim);
 		let df = fi.sub_v(fj);
 
+		// old (is this right?)
 		let fpar = par(df,dr);
+		let fi = fi.sub_v(fpar);
 
-		let (fi,fj) = (fi.sub_v(fpar), fj);
+		// new
+//		let fi = perp(fi,dr).add_v(par(fj,dr));
+
 		tup3set(something, i, fi);
 		tup3set(something, j, fj);
 
@@ -458,53 +665,237 @@ fn cancel_something(something: &mut [f64], positions: &[f64], free_indices: &[us
 	}
 }
 
+fn add_radius_term(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], strength: f64, target_radius: f64) -> ::sp2::Relax {
+	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
+	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
+
+	// verify dependencies are in order (parents before children)
+	for (ii,&i) in free_indices.iter().enumerate() {
+		if let Some(jj) = free_indices.iter().position(|&x| x == parents[i]) {
+			assert!(ii > jj);
+		}
+	}
+
+	for &i in free_indices {
+		let j = parents[i];
+
+		let ri = tup3(&md.position, i);
+		let rj = tup3(&md.position, j);
+		let dr = nearest_image_sub(ri, rj, dim);
+		let r = dr.sqnorm().sqrt();
+		let f_add = dr.mul_s(2. * strength * (target_radius/r - 1.));
+
+		let f = tup3(&md.force, i);
+
+		tup3set(&mut md.force, i, f.add_v(f_add));
+	}
+	md
+}
+
+fn add_theta_term(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], strength: f64, target_angle: f64) -> ::sp2::Relax {
+	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
+	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
+	let apply = |iso: NaIso, v: (f64,f64,f64)| { from_na_point(iso * to_na_point(v)) };
+	let applyV = |iso: NaIso, v: (f64,f64,f64)| { from_na_vector(iso * to_na_vector(v)) };
+
+	// verify dependencies are in order (parents before children)
+	for (ii,&i) in free_indices.iter().enumerate() {
+		if let Some(jj) = free_indices.iter().position(|&x| x == parents[i]) {
+			assert!(ii > jj);
+		}
+	}
+
+	for &i in free_indices {
+		let ri = tup3(&md.position, i);
+		let rj = tup3(&md.position, parents[i]);
+		let rk = tup3(&md.position, parents[parents[i]]);
+
+		let rj = ri.add_v(nearest_image_sub(rj, ri, dim));
+		let rk = rj.add_v(nearest_image_sub(rk, rj, dim));
+
+		// move into the basis of i's parent bond  (rj at center, x axis away from rk)
+
+		// FIXME why won't this work?  seems something is up...
+		//let inv = bond_iso(rj, rk, dim).inverse_transformation();
+		//let ri = apply(inv, ri);
+		//let rj = apply(inv, rj);
+		//let rk = apply(inv, rk);
+		let (beta,alpha,ri,rj,rk) = {
+			let ri = ri.sub_v(rj);
+			let rj = rj.sub_v(rj);
+			let rk = rk.sub_v(rj);
+
+			let (x,y,z) = rk;
+
+			let beta = z.atan2(y);
+			let iso = rotate_x(-beta);
+			let ri      = apply(iso, ri);
+			let (x,y,z) = apply(iso, (x,y,z));
+			assert!(z.abs() < 1e-5, "{}", z);
+
+			let alpha = y.atan2(x);
+			let iso = rotate_z(-alpha + PI);
+			let ri      = apply(iso, ri);
+			let (x,y,z) = apply(iso, (x,y,z));
+			assert!(y.abs() < 1e-5, "{}", y);
+
+			(beta,alpha,ri, rj, (x,y,z))
+		};
+
+		{
+			// ensure rj is on the origin
+			assert!(rj.sqnorm() <= 1e-7, "{:?}", rj);
+
+			// ensure rk looks like it is along -x
+			let mut rk = rk;
+			assert!(rk.0 < -0.3);
+			rk.0 = 0.;
+			assert!(rk.sqnorm() <= 1e-7, "{:?}", rk);
+		}
+
+		// Define  gamma := cos theta (== x/r),  w/ theta being the exterior angle (angle to +x axis).
+		// Add a potential term of  K * (gamma - cos target)^2
+
+		let (x,y,z) = ri;
+		let r = ri.sqnorm().sqrt();
+		let gam = x / r;
+
+		let prefac  = 2. * strength * (gam - target_angle.cos());
+		let dgam_dr = (y*y + z*z, -x*y, -x*z).div_s(r*r*r);
+
+		let f_add = dgam_dr.mul_s(-1.0 * prefac);
+
+		// bring f_add back into cartesian.
+		// (note: transformation from  grad' V  to  grad V  is transpose matrix of the one
+		//   that maps x to x')
+		let f_add = applyV(rotate_z(alpha - PI), f_add);
+		let f_add = applyV(rotate_x(beta), f_add);
+
+		let f = tup3(&md.force, i);
+		tup3set(&mut md.force, i, f.add_v(f_add));
+	}
+	md
+}
+
+fn add_centripetal_terms(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> ::sp2::Relax {
+	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
+	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
+
+	// verify dependencies are in order (parents before children)
+	for (ii,&i) in free_indices.iter().enumerate() {
+		if let Some(jj) = free_indices.iter().position(|&x| x == parents[i]) {
+			assert!(ii > jj);
+		}
+	}
+
+	for &i in free_indices {
+		let j = parents[i];
+
+		let ri = tup3(&md.position, i);
+		let rj = tup3(&md.position, j);
+		let vi = tup3(&md.velocity, i);
+		let vj = tup3(&md.velocity, j);
+		let fi = tup3(&md.force, i);
+		let fj = tup3(&md.force, j);
+		
+		let dr = nearest_image_sub(ri, rj, dim);
+		let dv = vi.sub_v(vj);
+
+		let vsq_tangential = perp(dv, dr).sqnorm();
+		let f_centrip = dr.mul_s(-1.0 * perp(dv, dr).sqnorm() / dr.sqnorm());
+
+		tup3set(&mut md.force, i, fi.add_v(f_centrip));
+	}
+	md
+}
+
+
+fn reset_radii(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> ::sp2::Relax {
+	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
+	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
+
+	for &i in free_indices {
+		let j = parents[i];
+		let ri = tup3(&md.position, i);
+		let rj = tup3(&md.position, j);
+		let dr = nearest_image_sub(ri, rj, dim);
+
+		let dr_norm = dr.sqnorm().sqrt();
+		let dr_unit = dr.div_s(dr_norm);
+
+		let dr = dr_unit.mul_s(0.95 * target_radius + 0.05 * dr_norm);
+		tup3set(&mut md.position, i, rj.add_v(dr));
+	}
+	md
+}
+
+fn adjust_onto_cones(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> ::sp2::Relax {
+	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
+	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
+
+	for &i in free_indices {
+		let ri = tup3(&md.position, i);
+		let rj = tup3(&md.position, parents[i]);
+		let rk = tup3(&md.position, parents[parents[i]]);
+
+		let rcos = (60f64).to_radians().cos()*target_radius;
+		let rsin = (60f64).to_radians().sin()*target_radius;
+
+		// move the valid circle of positions onto the YZ plane with an inverse transform
+		let iso = bond_iso(rj, rk, dim).append_transformation(&translate((rcos,0.,0.)));
+		let inv = iso.inverse_transformation();
+		let ri = from_na_point(inv * to_na_point(ri));
+
+		// move the position onto the nearest point on that circle
+		let ryz = (ri.1,ri.2);
+		let ryz = ryz.div_s(ryz.sqnorm().sqrt()).mul_s(rsin);
+		let ri = (0., ryz.0, ryz.1);
+
+		// transform back
+		let ri = from_na_point(iso * to_na_point(ri));
+		tup3set(&mut md.position, i, ri);
+	}
+	md
+}
+
+
+fn cone_adjusting_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> ::sp2::Relax {
+	let md = adjust_onto_cones(md, free_indices, dim, parents, target_radius);
+	let md = just_write_forces(md, free_indices, dim);
+	md
+}
+
+fn radius_resetting_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> ::sp2::Relax {
+	let md = reset_radii(md, free_indices, dim, parents, target_radius);
+	let md = just_write_forces(md, free_indices, dim);
+	md
+}
+
 fn force_canceling_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> ::sp2::Relax {
-	let mut md = straight_forward_force_writer(md, free_indices, dim);
+	let mut md = just_write_forces(md, free_indices, dim);
 	cancel_something(&mut md.force, &md.position, free_indices, dim, parents);
 	md
 }
 
-fn velocity_canceling_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> ::sp2::Relax {
-	let mut md = straight_forward_force_writer(md, free_indices, dim);
-	cancel_something(&mut md.velocity, &md.position, free_indices, dim, parents);
+fn centripetal_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> ::sp2::Relax {
+	let mut md = just_write_forces(md, free_indices, dim);
+	cancel_something(&mut md.force, &md.position, free_indices, dim, parents);
+//	cancel_something(&mut md.velocity, &md.position, free_indices, dim, parents);
+	let md = add_centripetal_terms(md, free_indices, dim, parents);
 	md
 }
 
-// Relaxes the last few atoms on the tree (which can safely be worked with without having
-// to unroot other atoms)
-fn relax_suffix_using_fire(mut tree: Tree, n_fixed: usize) -> Tree {
-	match n_fixed {
-		0 => { return relax_all_using_fire(tree); },
-		1 => { panic!("n_fixed == 1"); }, // a PITA edge case that's pointless anyways
-		n if n == tree.len() => { return tree; },
-		_ => {}
-	};
+fn new_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], strength1: f64, strength2: f64, target_radius: f64) -> ::sp2::Relax {
+	let mut md = just_write_forces(md, free_indices, dim);
+	let md = add_radius_term(md, free_indices, dim, parents, strength1, target_radius);
+	let md = add_theta_term(md, free_indices, dim, parents, strength2, 60f64.to_radians());
+	md
+}
 
-	let free_indices = (n_fixed..tree.len()).collect_vec();
-
-	// force computation works with [(f64,f64,f64)] and includes all positions;
-	// relaxation works with flattened [f64], and... also now includes all positions.
-	let labels: Vec<_> = tree.labels[n_fixed..].to_vec();
-
-	// FIXME Params should not be in ::sp2
-	let params = ::sp2::Params {
-		timestep_start: 1e-3,
-//		alpha_dec: 1.,
-//		alpha_max: 0.1,
-		timestep_max:   0.05,
-		force_tolerance: Some(1e-5),
-		step_limit: Some(4000),
-		..Default::default()
-	};
-
-	let pos = {
-		let mut relax = sp2::Relax::init(params, flatten(&tree.pos.clone()));
-		let force_fn = |md| straight_forward_force_writer(md, &free_indices[..], tree.dimension);
-		relax.relax(force_fn)
-	};
-
-	tree.dangerously_reassign_positions(unflatten(&pos));
-	tree
+fn velocity_canceling_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> ::sp2::Relax {
+	let mut md = just_write_forces(md, free_indices, dim);
+	cancel_something(&mut md.velocity, &md.position, free_indices, dim, parents);
+	md
 }
 
 fn unflatten<T:Copy>(slice: &[T]) -> Vec<(T,T,T)> {
@@ -598,6 +989,12 @@ fn squiggle_nucleus(dimension: Trip<f64>) -> Tree {
 	tree
 }
 
+fn one_dimer(dimension: Trip<f64>) -> Tree {
+	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (LABEL_SILICON, LABEL_SILICON));
+	tree.transform_mut(translate(dimension.mul_s(0.5)));
+	tree
+}
+
 fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (LABEL_SILICON, LABEL_SILICON));
 	let i = tree.attach_new(1, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
@@ -675,71 +1072,18 @@ fn test_outputs() {
 	doit(tree.clone(), "squiggle.xyz");
 }
 
-fn dla_run() -> Tree {
-	let mut tree = hexagon_nucleus(DIMENSION);
+#[derive(Eq,PartialEq,Copy,Clone)]
+enum Dee { Two, Three }
 
-	let mut rng = rand::weak_rng();
-
-	let nbr_radius = MOVE_RADIUS + PARTICLE_RADIUS;
-
-	let mut timer = Timer::new(30);
-
-	let final_particles = 2*NPARTICLE + tree.len();
-
-	for n in 0..NPARTICLE {
-		write!(stderr(), "Particle {:8} of {:8}: ", n, NPARTICLE).unwrap();
-
-		let mut state = State::from_positions(DIMENSION, tree.pos.clone().into_iter().zip(tree.labels.clone()));
-
-		let mut pos = random_border_position(&mut rng);
-
-		// move until ready to place
-		while state.neighborhood(pos, nbr_radius).is_empty() {
-			//writeln!(stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
-			//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
-
-			let disp = random_direction(&mut rng)
-				.mul_s(MOVE_RADIUS).frac(state.dimension);
-
-			pos = reduce_pbc(pos.add_v(disp));
-		}
-
-		{ // make the two angles random
-			let i = state.closest_neighbor(pos, nbr_radius).unwrap();
-			let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
-			let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
-		}
-
-		// HACK to get relaxed positions, ignoring the code in state
-		// (tbh neighbor finding and relaxation should be separated out of state)
-		let n_free = 2;
-		{
-			let unrelaxed = tree.pos.clone();
-			let n_total = unrelaxed.len();
-			let n_fixed = n_total - n_free;
-
-			tree = relax_suffix_using_fire(tree, n_fixed);
-		}
-
-		// debugging info
-		timer.push();
-		writeln!(stderr(), "({:22},{:22},{:22})  ({:8?} ms)  (avg: {:8?} ms)  (relaxed {:3})",
-			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free
-		).unwrap();
-
-		write_xyz(&mut stdout(), &tree, final_particles);
+fn distances_from_tree(tree: &Tree) -> Vec<f64> {
+	let mut out = vec![];
+	for i in 0..tree.len() {
+		let j = tree.parents[i];
+		out.push(
+			tree.pos[i].sub_v(tree.pos[j]).sqnorm().sqrt()
+		);
 	}
-
-	{
-		let dimension = tree.dimension;
-		let pos = tree.pos.clone().into_iter().map(|x| reduce_pbc(x.frac(dimension)).cart(dimension));
-		write_xyz_(&mut stdout(), pos, tree.labels.clone(), final_particles);
-	}
-	assert_eq!(final_particles, tree.len());
-	tree
+	out
 }
 
-fn main() {
-//	test_outputs();
-	dla_run();
-}
+

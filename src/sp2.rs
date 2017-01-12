@@ -177,10 +177,12 @@ impl Relax
 			assert_eq!(self.position.len(), self.velocity.len());
 			assert_eq!(self.velocity.len(), self.force.len());
 
+			//println!("{:?}", &self.force);
 			// MD. (Newton method)
 			for (p, &v) in izip!(&mut self.position, &self.velocity) { *p = *p + v*self.timestep; }
 			for (v, &f) in izip!(&mut self.velocity, &self.force)    { *v = *v + f*self.timestep; }
 
+			//println!("{:?}", &self.force);
 			if self.should_stop() { break }
 
 			self.step_fire();
