@@ -1,11 +1,27 @@
 
+#![feature(non_ascii_idents)]
+
 // FIXME inconsistent usage of DIMENSION and state.dimension
 const DIMENSION: Trip<Float> = (100., 6., 100.);
 const NPARTICLE: usize = 100;
 
-const THETA_STRENGTH:  Float = 1000.;
-const RADIUS_STRENGTH: Float = 1000.;
+const DEBUG: bool = false;
+
+// 1000. for 13 output
+const THETA_STRENGTH:  Float = 100.;
+const RADIUS_STRENGTH: Float = 100.;
 const TARGET_RADIUS: Float = 1.4;
+
+#[derive(PartialEq,Copy,Clone,Debug)]
+enum Force {
+	Morse { center: f64, D: f64, k: f64, },
+	Quadratic { center: f64, k: f64, },
+}
+use self::Force::*;
+
+//const RADIUS_MORSE: Morse = Morse { center: 1.41, D: 100., k: 100. };
+const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 100. };
+const THETA_FORCE: Force = Quadratic { center: (120.*PI/180.), k: 100. };
 
 // VM: * Dimer sep should be 1.4 (Angstrom)
 //     * Interaction radius (to begin relaxation) should be 2
@@ -42,6 +58,8 @@ fn dla_run(dee: Dee) -> Tree {
 
 	let final_particles = 2*NPARTICLE + tree.len();
 
+	let mut debug_file = ::std::fs::File::create("debug").unwrap();
+
 	for n in 0..NPARTICLE {
 		write!(stderr(), "Particle {:8} of {:8}: ", n, NPARTICLE).unwrap();
 
@@ -77,7 +95,17 @@ fn dla_run(dee: Dee) -> Tree {
 
 			let n_fixed = n_total - n_free;
 
-			tree = relax_suffix_using_fire(tree, n_fixed);
+			//tree = relax_suffix_using_fire(tree, n_fixed, |md| {
+			tree = relax_suffix_using_fire(tree, 6, |md| {
+				if !DEBUG { return }
+
+				writeln!(debug_file, "F {} {} {} {} {}", n, md.nstep, md.alpha, md.timestep, md.cooldown);
+				for i in 0..md.position.len()/3 {
+					let v = (md.velocity[3*i+0], md.velocity[3*i+1], md.velocity[3*i+2]).sqnorm().sqrt();
+					let f = (md.force[3*i+0], md.force[3*i+1], md.force[3*i+2]).sqnorm().sqrt();
+					writeln!(debug_file, "A {} {} {} {:.6} {:.6}", n, md.nstep, i, v, f);
+				}
+			});
 		}
 
 		// debugging info
@@ -145,7 +173,7 @@ fn dla_run_test(dee: Dee) -> Tree {
 
 			let oldf = ::sp2::calc_potential(tree.pos.clone(), tree.dimension).1;
 			let oldx = tree.pos.clone();
-			tree = relax_suffix_using_fire(tree, 2);
+			tree = relax_suffix_using_fire(tree, 2, |_| {});
 			let newf = ::sp2::calc_potential(tree.pos.clone(), tree.dimension).1;
 			let newx = tree.pos.clone();
 
@@ -174,9 +202,25 @@ fn dla_run_test(dee: Dee) -> Tree {
 	tree
 }
 
+impl Force {
+	// signed value of force along +x
+	fn force(self: Force, x: f64) -> f64 {
+		match self {
+			Quadratic { center, k, } => {
+				2. * k * (center - x)
+			},
+			Morse { center, k, D } => {
+				let a = (k/(2. * D)).sqrt();
+				let f = (-a * (x - center)).exp();
+				2. * a * D * f * (f - 1.)
+			},
+		}
+	}
+}
+
 // Relaxes the last few atoms on the tree (which can safely be worked with without having
 // to unroot other atoms)
-fn relax_suffix_using_fire(mut tree: Tree, n_fixed: usize) -> Tree {
+fn relax_suffix_using_fire<C: FnMut(&Relax)>(mut tree: Tree, n_fixed: usize, mut cb: C) -> Tree {
 	match n_fixed {
 		0 => { return relax_all_using_fire(tree); },
 		1 => { panic!("n_fixed == 1"); }, // a PITA edge case that's pointless anyways
@@ -196,10 +240,13 @@ fn relax_suffix_using_fire(mut tree: Tree, n_fixed: usize) -> Tree {
 		timestep_max:   0.05,
 		force_tolerance: Some(1e-5),
 		step_limit: Some(4000),
-	//	timestep_max:   1e-6,
-	//	timestep_start: 1e-6,
+	//	step_limit: Some(12000),
+//		timestep_start: 1e-6, // 10
+		//timestep_max:   1e-2,
+//		timestep_max:   1e-4,
+		//timestep_start: 1e-7,
 	//	force_tolerance: Some(1e-7),
-	//	step_limit: Some(40000),
+		//step_limit: Some(40000),
 		..Default::default()
 	};
 
@@ -212,7 +259,8 @@ fn relax_suffix_using_fire(mut tree: Tree, n_fixed: usize) -> Tree {
 		//let force_fn = |md| radius_resetting_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..], 1.41);
 		//let force_fn = |md| cone_adjusting_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..], 1.41);
 		//let force_fn = |md| zero_forces(md);
-		let force_fn = |md| new_writer(md, &free_indices[..], tree.dimension, &tree.parents[..], RADIUS_STRENGTH, THETA_STRENGTH, TARGET_RADIUS);
+		//let force_fn = |md| new_writer(md, &mut cb, &free_indices[..], tree.dimension, &tree.parents[..], RADIUS_STRENGTH, THETA_STRENGTH, TARGET_RADIUS);
+		let force_fn = |md| morse_writer(md, &mut cb, &free_indices[..], tree.dimension, &tree.parents[..]);
 		relax.relax(force_fn)
 	};
 
@@ -243,6 +291,7 @@ extern crate nalgebra;
 
 
 mod sp2;
+use sp2::Relax;
 
 use rand::Rng;
 use rand::distributions::{IndependentSample,Normal};
@@ -606,13 +655,13 @@ fn perp(a: Trip<f64>, b: Trip<f64>) -> Trip<f64> {
 	c
 }
 
-fn zero_forces(mut md: ::sp2::Relax) -> ::sp2::Relax {
+fn zero_forces(mut md: Relax) -> Relax {
 	md.force.resize(0, 0.);
 	md.force.resize(md.position.len(), 0.);
 	md
 }
 
-fn just_write_forces(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>) -> ::sp2::Relax {
+fn just_write_forces(mut md: Relax, free_indices: &[usize], dim: Trip<f64>) -> Relax {
 	let (potential,force) = sp2::calc_potential_flat(md.position.clone(), dim);
 
 	let mut md = zero_forces(md);
@@ -665,7 +714,7 @@ fn cancel_something(something: &mut [f64], positions: &[f64], free_indices: &[us
 	}
 }
 
-fn add_radius_term(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], strength: f64, target_radius: f64) -> ::sp2::Relax {
+fn add_radius_term(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], strength: f64, target_radius: f64) -> Relax {
 	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
 	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
 
@@ -692,7 +741,121 @@ fn add_radius_term(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>,
 	md
 }
 
-fn add_theta_term(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], strength: f64, target_angle: f64) -> ::sp2::Relax {
+/*
+fn add_radius_morse(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
+	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
+	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
+
+	// verify dependencies are in order (parents before children)
+	for (ii,&i) in free_indices.iter().enumerate() {
+		if let Some(jj) = free_indices.iter().position(|&x| x == parents[i]) {
+			assert!(ii > jj);
+		}
+	}
+
+	for &i in free_indices {
+		let ri = tup3(&md.position, i);
+		let rj = tup3(&md.position, parents[i]);
+
+		let dr = nearest_image_sub(ri, rj, dim);
+		let r = dr.sqnorm().sqrt();
+		let r_unit = dr.div_s(r);
+
+		let f_add = r_unit.mul_s(RADIUS_MORSE.force(r));
+		let f = tup3(&md.force, i);
+
+		tup3set(&mut md.force, i, f.add_v(f_add));
+	}
+	md
+}
+*/
+
+fn add_morse(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
+	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
+	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
+	let apply  = |iso: NaIso, v: (f64,f64,f64)| { from_na_point(iso * to_na_point(v)) };
+	let applyV = |iso: NaIso, v: (f64,f64,f64)| { from_na_vector(iso * to_na_vector(v)) };
+
+	// verify dependencies are in order (parents before children)
+	for (ii,&i) in free_indices.iter().enumerate() {
+		if let Some(jj) = free_indices.iter().position(|&x| x == parents[i]) {
+			assert!(ii > jj);
+		}
+	}
+
+	for &i in free_indices {
+		let pi = tup3(&md.position, i);
+		let pj = tup3(&md.position, parents[i]);
+		let pk = tup3(&md.position, parents[parents[i]]);
+
+		let pj = pi.add_v(nearest_image_sub(pj, pi, dim));
+		let pk = pj.add_v(nearest_image_sub(pk, pj, dim));
+
+		// move parent to origin
+		let (pi,pj,pk) = (pi,pj,pk).map(|x| x.sub_v(pj));
+
+		// rotate parent's parent to +z
+		let (_,θk,φk) = spherical_from_cart(pk);
+		let iso = rotate_y(-θk) * rotate_z(-φk);
+		let inv = iso.inverse_transformation();
+		let (pi,pj,pk) = (pi,pj,pk).map(|x| apply(iso, x));
+
+		// are things placed about where we expect?
+		let (_,θk,φk) = spherical_from_cart(pk);
+		assert!(pj.0.abs() < 1e-5, "{}", pj.0);
+		assert!(pj.1.abs() < 1e-5, "{}", pj.1);
+		assert!(pj.2.abs() < 1e-5, "{}", pj.2);
+		assert!(pk.0.abs() < 1e-5, "{}", pk.0);
+		assert!(pk.1.abs() < 1e-5, "{}", pk.1);
+		assert!(pk.2 > 0.,         "{}", pk.2);
+
+		// get dat angle
+		let (ri,θi,_) = spherical_from_cart(pi);
+		let r_hat = unit_r_from_cart(pi);
+		let θ_hat = unit_θ_from_cart(pi);
+
+		// forces
+		//let f_θ = θ_hat.mul_s(THETA_MORSE.force(θi));
+		let f_θ = θ_hat.mul_s(THETA_FORCE.force(θi));
+		let f_r = r_hat.mul_s(RADIUS_FORCE.force(ri));
+		let f_add = f_θ.add_v(f_r);
+
+		// bring f_add back into cartesian.
+		// (note: transformation from  grad' V  to  grad V  is more generally the
+		//   transpose matrix of the one that maps x to x'. But for a rotation,
+		//   this is also the inverse.)
+		let f_add = applyV(inv, f_add);
+
+		let f = tup3(&md.force, i);
+		tup3set(&mut md.force, i, f.add_v(f_add));
+	}
+	md
+}
+
+fn spherical_from_cart((x,y,z): Trip<f64>) -> Trip<f64> {
+	let ρ = (x*x + y*y).sqrt();
+	let r = (ρ*ρ + z*z).sqrt();
+	(r, ρ.atan2(z), y.atan2(x))
+}
+
+fn unit_r_from_cart(p: Trip<f64>) -> Trip<f64> {
+	let r = p.sqnorm().sqrt();
+	p.map(|x| x/r)
+}
+
+fn unit_θ_from_cart((x,y,z): Trip<f64>) -> Trip<f64> {
+	let ρ = (x*x + y*y).sqrt();
+	let r = (ρ*ρ + z*z).sqrt();
+	(x*z/ρ/r, y*z/ρ/r, -ρ/r)
+}
+
+fn cart_from_spherical((r,θ,φ): Trip<f64>) -> Trip<f64> {
+	let (sinθ,cosθ) = (θ.sin(), θ.cos());
+	let (sinφ,cosφ) = (φ.sin(), φ.cos());
+	(r*sinθ*cosφ, r*sinθ*sinφ, r*cosθ)
+}
+
+fn add_theta_term(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], strength: f64, target_angle: f64) -> Relax {
 	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
 	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
 	let apply = |iso: NaIso, v: (f64,f64,f64)| { from_na_point(iso * to_na_point(v)) };
@@ -706,70 +869,50 @@ fn add_theta_term(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, 
 	}
 
 	for &i in free_indices {
-		let ri = tup3(&md.position, i);
-		let rj = tup3(&md.position, parents[i]);
-		let rk = tup3(&md.position, parents[parents[i]]);
+		let pi = tup3(&md.position, i);
+		let pj = tup3(&md.position, parents[i]);
+		let pk = tup3(&md.position, parents[parents[i]]);
 
-		let rj = ri.add_v(nearest_image_sub(rj, ri, dim));
-		let rk = rj.add_v(nearest_image_sub(rk, rj, dim));
+		// ensure good images
+		let pj = pi.add_v(nearest_image_sub(pj, pi, dim));
+		let pk = pj.add_v(nearest_image_sub(pk, pj, dim));
 
-		// move into the basis of i's parent bond  (rj at center, x axis away from rk)
+		// move parent to origin
+		let (pi,pj,pk) = (pi,pj,pk).map(|x| x.sub_v(pj));
 
-		// FIXME why won't this work?  seems something is up...
-		//let inv = bond_iso(rj, rk, dim).inverse_transformation();
-		//let ri = apply(inv, ri);
-		//let rj = apply(inv, rj);
-		//let rk = apply(inv, rk);
-		let (beta,alpha,ri,rj,rk) = {
-			let ri = ri.sub_v(rj);
-			let rj = rj.sub_v(rj);
-			let rk = rk.sub_v(rj);
+		// rotate parent's parent to +z
+		let (_,θk,φk) = spherical_from_cart(pk);
+		let iso = rotate_y(-θk) * rotate_z(-φk);
+		let inv = iso.inverse_transformation();
+		let (pi,pj,pk) = (pi,pj,pk).map(|x| apply(iso, x));
 
-			let (x,y,z) = rk;
+		// are things placed about where we expect?
+		let (_,θk,φk) = spherical_from_cart(pk);
+		assert!(pj.0.abs() < 1e-5, "{}", pj.0);
+		assert!(pj.1.abs() < 1e-5, "{}", pj.1);
+		assert!(pj.2.abs() < 1e-5, "{}", pj.2);
+		assert!(pk.0.abs() < 1e-5, "{}", pk.0);
+		assert!(pk.1.abs() < 1e-5, "{}", pk.1);
+		assert!(pk.2 > 0.,         "{}", pk.2);
 
-			let beta = z.atan2(y);
-			let iso = rotate_x(-beta);
-			let ri      = apply(iso, ri);
-			let (x,y,z) = apply(iso, (x,y,z));
-			assert!(z.abs() < 1e-5, "{}", z);
+		// get dat angle
+//		let (x,y,z) = spherical_from_cart(pi); // XXX
+//		let (x,y,z) = pi; // XXX
+//		let (ri,θi,_) = spherical_from_cart(pi);
 
-			let alpha = y.atan2(x);
-			let iso = rotate_z(-alpha + PI);
-			let ri      = apply(iso, ri);
-			let (x,y,z) = apply(iso, (x,y,z));
-			assert!(y.abs() < 1e-5, "{}", y);
+		let (x,y,z) = pi;
+		let θ_hat = unit_θ_from_cart(pi);
+		let (ri,θi,_) = spherical_from_cart(pi);
 
-			(beta,alpha,ri, rj, (x,y,z))
-		};
-
-		{
-			// ensure rj is on the origin
-			assert!(rj.sqnorm() <= 1e-7, "{:?}", rj);
-
-			// ensure rk looks like it is along -x
-			let mut rk = rk;
-			assert!(rk.0 < -0.3);
-			rk.0 = 0.;
-			assert!(rk.sqnorm() <= 1e-7, "{:?}", rk);
-		}
-
-		// Define  gamma := cos theta (== x/r),  w/ theta being the exterior angle (angle to +x axis).
-		// Add a potential term of  K * (gamma - cos target)^2
-
-		let (x,y,z) = ri;
-		let r = ri.sqnorm().sqrt();
-		let gam = x / r;
-
-		let prefac  = 2. * strength * (gam - target_angle.cos());
-		let dgam_dr = (y*y + z*z, -x*y, -x*z).div_s(r*r*r);
-
-		let f_add = dgam_dr.mul_s(-1.0 * prefac);
+		// force of K (theta - theta_0)^2
+		let prefac = 2. * strength * (target_angle - θi);
+		let f_add = θ_hat.mul_s(prefac);
 
 		// bring f_add back into cartesian.
-		// (note: transformation from  grad' V  to  grad V  is transpose matrix of the one
-		//   that maps x to x')
-		let f_add = applyV(rotate_z(alpha - PI), f_add);
-		let f_add = applyV(rotate_x(beta), f_add);
+		// (note: transformation from  grad' V  to  grad V  is more generally the
+		//   transpose matrix of the one that maps x to x'. But for a rotation,
+		//   this is also the inverse.)
+		let f_add = applyV(inv, f_add);
 
 		let f = tup3(&md.force, i);
 		tup3set(&mut md.force, i, f.add_v(f_add));
@@ -777,7 +920,7 @@ fn add_theta_term(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, 
 	md
 }
 
-fn add_centripetal_terms(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> ::sp2::Relax {
+fn add_centripetal_terms(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
 	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
 	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
 
@@ -810,7 +953,7 @@ fn add_centripetal_terms(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip
 }
 
 
-fn reset_radii(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> ::sp2::Relax {
+fn reset_radii(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> Relax {
 	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
 	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
 
@@ -829,7 +972,7 @@ fn reset_radii(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, par
 	md
 }
 
-fn adjust_onto_cones(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> ::sp2::Relax {
+fn adjust_onto_cones(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> Relax {
 	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
 	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
 
@@ -859,25 +1002,25 @@ fn adjust_onto_cones(mut md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64
 }
 
 
-fn cone_adjusting_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> ::sp2::Relax {
+fn cone_adjusting_force_writer(md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> Relax {
 	let md = adjust_onto_cones(md, free_indices, dim, parents, target_radius);
 	let md = just_write_forces(md, free_indices, dim);
 	md
 }
 
-fn radius_resetting_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> ::sp2::Relax {
+fn radius_resetting_force_writer(md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> Relax {
 	let md = reset_radii(md, free_indices, dim, parents, target_radius);
 	let md = just_write_forces(md, free_indices, dim);
 	md
 }
 
-fn force_canceling_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> ::sp2::Relax {
+fn force_canceling_force_writer(md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
 	let mut md = just_write_forces(md, free_indices, dim);
 	cancel_something(&mut md.force, &md.position, free_indices, dim, parents);
 	md
 }
 
-fn centripetal_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> ::sp2::Relax {
+fn centripetal_force_writer(md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
 	let mut md = just_write_forces(md, free_indices, dim);
 	cancel_something(&mut md.force, &md.position, free_indices, dim, parents);
 //	cancel_something(&mut md.velocity, &md.position, free_indices, dim, parents);
@@ -885,14 +1028,24 @@ fn centripetal_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<
 	md
 }
 
-fn new_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], strength1: f64, strength2: f64, target_radius: f64) -> ::sp2::Relax {
+
+fn new_writer<C: FnMut(&Relax)>(md: Relax, mut cb: C, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], strength1: f64, strength2: f64, target_radius: f64) -> Relax {
 	let mut md = just_write_forces(md, free_indices, dim);
 	let md = add_radius_term(md, free_indices, dim, parents, strength1, target_radius);
-	let md = add_theta_term(md, free_indices, dim, parents, strength2, 60f64.to_radians());
+	let mut md = add_theta_term(md, free_indices, dim, parents, strength2, 120f64.to_radians());
+	cb(&md);
 	md
 }
 
-fn velocity_canceling_force_writer(md: ::sp2::Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> ::sp2::Relax {
+// code archeologists: can you figure out the evolutionary history behind this copy pasta?
+fn morse_writer<C: FnMut(&Relax)>(md: Relax, mut cb: C, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
+	let mut md = just_write_forces(md, free_indices, dim);
+	let mut md = add_morse(md, free_indices, dim, parents);
+	cb(&md);
+	md
+}
+
+fn velocity_canceling_force_writer(md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
 	let mut md = just_write_forces(md, free_indices, dim);
 	cancel_something(&mut md.velocity, &md.position, free_indices, dim, parents);
 	md
