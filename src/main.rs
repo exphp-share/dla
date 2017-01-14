@@ -6,6 +6,7 @@ const DIMENSION: Trip<Float> = (100., 6., 100.);
 const NPARTICLE: usize = 100;
 
 const DEBUG: bool = false;
+const XYZ_DEBUG: bool = true;
 
 // 1000. for 13 output
 const THETA_STRENGTH:  Float = 100.;
@@ -20,8 +21,8 @@ enum Force {
 use self::Force::*;
 
 //const RADIUS_MORSE: Morse = Morse { center: 1.41, D: 100., k: 100. };
-const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 100. };
-const THETA_FORCE: Force = Quadratic { center: (120.*PI/180.), k: 100. };
+const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 0. };
+const THETA_FORCE: Force = Quadratic { center: (120.*PI/180.), k: 0. };
 
 // VM: * Dimer sep should be 1.4 (Angstrom)
 //     * Interaction radius (to begin relaxation) should be 2
@@ -60,8 +61,8 @@ fn dla_run(dee: Dee) -> Tree {
 
 	let mut debug_file = ::std::fs::File::create("debug").unwrap();
 
-	for n in 0..NPARTICLE {
-		write!(stderr(), "Particle {:8} of {:8}: ", n, NPARTICLE).unwrap();
+	for dla_step in 0..NPARTICLE {
+		write!(stderr(), "Particle {:8} of {:8}: ", dla_step, NPARTICLE).unwrap();
 
 		let mut state = State::from_positions(DIMENSION, tree.pos.clone().into_iter().zip(tree.labels.clone()));
 
@@ -96,14 +97,35 @@ fn dla_run(dee: Dee) -> Tree {
 			let n_fixed = n_total - n_free;
 
 			//tree = relax_suffix_using_fire(tree, n_fixed, |md| {
+			let mut xyz_debug_file = if XYZ_DEBUG {
+				// (obviously not the right way to build a path; whatever that way is)
+				let path = format!("xyz-debug/event-{:06}.xyz", dla_step);
+				Some(::std::fs::File::create(&path).unwrap())
+			} else { None };
+
+			let labels = tree.labels.clone();
 			tree = relax_suffix_using_fire(tree, 6, |md| {
+
+				if let Some(file) = xyz_debug_file.as_mut() {
+					let mut pos = unflatten(&md.position);
+					let mut lab = labels.clone();
+					let w = DIMENSION.0;
+					lab.push("O"); pos.push((0., -1., 0.));
+					lab.push("O"); pos.push((w, -1., 0.));
+					lab.push("O"); pos.push((2.*(15. + (md.timestep).ln()), -1., 0.));
+					lab.push("O"); pos.push((0., -2., 0.));
+					lab.push("O"); pos.push((w, -2., 0.));
+					lab.push("O"); pos.push((w * (1. + md.cooldown as f64) / (2. + md.params.inertia_delay as f64), -2., -0.));
+					write_xyz_(file, pos, lab.clone(), lab.len());
+				}
+
 				if !DEBUG { return }
 
-				writeln!(debug_file, "F {} {} {} {} {}", n, md.nstep, md.alpha, md.timestep, md.cooldown);
+				writeln!(debug_file, "F {} {} {} {} {}", dla_step, md.nstep, md.alpha, md.timestep, md.cooldown);
 				for i in 0..md.position.len()/3 {
 					let v = (md.velocity[3*i+0], md.velocity[3*i+1], md.velocity[3*i+2]).sqnorm().sqrt();
 					let f = (md.force[3*i+0], md.force[3*i+1], md.force[3*i+2]).sqnorm().sqrt();
-					writeln!(debug_file, "A {} {} {} {:.6} {:.6}", n, md.nstep, i, v, f);
+					writeln!(debug_file, "A {} {} {} {:.6} {:.6}", dla_step, md.nstep, i, v, f);
 				}
 			});
 		}
@@ -137,7 +159,7 @@ fn dla_run_test(dee: Dee) -> Tree {
 
 	let final_particles = 4;
 
-	for n in 0..1 {
+	for dla_step in 0..1 {
 		let mut state = State::from_positions(DIMENSION, tree.pos.clone().into_iter().zip(tree.labels.clone()));
 
 		let mut pos = random_border_position(&mut rng);
@@ -801,7 +823,6 @@ fn add_morse(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[u
 		let (pi,pj,pk) = (pi,pj,pk).map(|x| apply(iso, x));
 
 		// are things placed about where we expect?
-		let (_,θk,φk) = spherical_from_cart(pk);
 		assert!(pj.0.abs() < 1e-5, "{}", pj.0);
 		assert!(pj.1.abs() < 1e-5, "{}", pj.1);
 		assert!(pj.2.abs() < 1e-5, "{}", pj.2);
@@ -815,7 +836,6 @@ fn add_morse(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[u
 		let θ_hat = unit_θ_from_cart(pi);
 
 		// forces
-		//let f_θ = θ_hat.mul_s(THETA_MORSE.force(θi));
 		let f_θ = θ_hat.mul_s(THETA_FORCE.force(θi));
 		let f_r = r_hat.mul_s(RADIUS_FORCE.force(ri));
 		let f_add = f_θ.add_v(f_r);
