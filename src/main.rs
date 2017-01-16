@@ -8,6 +8,7 @@ const NPARTICLE: usize = 100;
 
 const DEBUG: bool = false;
 const XYZ_DEBUG: bool = true;
+const FORCE_DEBUG: bool = true;
 
 // 1000. for 13 output
 const THETA_STRENGTH:  Float = 100.;
@@ -24,7 +25,7 @@ use self::Force::*;
 //const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 0. };
 const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 100. };
 //const RADIUS_FORCE: Force = Quadratic { center: 1.41, k: 100. };
-const THETA_FORCE: Force = Quadratic { center: (120.*PI/180.), k: 100. };
+const THETA_FORCE: Force = Quadratic { center: (120.*PI/180.), k: 0. };
 
 // VM: * Dimer sep should be 1.4 (Angstrom)
 //     * Interaction radius (to begin relaxation) should be 2
@@ -99,25 +100,29 @@ fn dla_run(dee: Dee) -> Tree {
 			let n_fixed = n_total - n_free;
 
 			let mut xyz_debug_file = if XYZ_DEBUG {
-				// (obviously not the right way to build a path; whatever that way is)
 				let path = format!("xyz-debug/event-{:06}.xyz", dla_step);
+				Some(::std::fs::File::create(&path).unwrap())
+			} else { None };
+
+			let mut force_debug_file = if FORCE_DEBUG {
+				let path = format!("xyz-debug/force-{:06}", dla_step);
 				Some(::std::fs::File::create(&path).unwrap())
 			} else { None };
 
 			let labels = tree.labels.clone();
 			//tree = relax_suffix_using_fire(tree, n_fixed, |md| {
-			tree = relax_suffix_using_fire(tree, 6, |md| {
+			tree = relax_suffix_using_fire(tree, 6, force_debug_file, |md| {
 
 				if let Some(file) = xyz_debug_file.as_mut() {
 					let mut pos = unflatten(&md.position);
 					let mut lab = labels.clone();
-					let w = DIMENSION.0;
-					lab.push("O"); pos.push((0., -1., 0.));
-					lab.push("O"); pos.push((w, -1., 0.));
-					lab.push("O"); pos.push((2.*(15. + (md.timestep).ln()), -1., 0.));
-					lab.push("O"); pos.push((0., -2., 0.));
-					lab.push("O"); pos.push((w, -2., 0.));
-					lab.push("O"); pos.push((w * (1. + md.cooldown as f64) / (2. + md.params.inertia_delay as f64), -2., -0.));
+//					let w = DIMENSION.0;
+//					lab.push("O"); pos.push((0., -1., 0.));
+//					lab.push("O"); pos.push((w, -1., 0.));
+//					lab.push("O"); pos.push((2.*(15. + (md.timestep).ln()), -1., 0.));
+//					lab.push("O"); pos.push((0., -2., 0.));
+//					lab.push("O"); pos.push((w, -2., 0.));
+//					lab.push("O"); pos.push((w * (1. + md.cooldown as f64) / (2. + md.params.inertia_delay as f64), -2., -0.));
 					write_xyz_(file, pos, lab.clone(), lab.len());
 				}
 
@@ -197,7 +202,7 @@ fn dla_run_test(dee: Dee) -> Tree {
 
 			let oldf = ::sp2::calc_potential(tree.pos.clone(), tree.dimension).1;
 			let oldx = tree.pos.clone();
-			tree = relax_suffix_using_fire(tree, 2, |_| {});
+			tree = relax_suffix_using_fire(tree, 2, None::<::std::fs::File>, |_| {});
 			let newf = ::sp2::calc_potential(tree.pos.clone(), tree.dimension).1;
 			let newx = tree.pos.clone();
 
@@ -242,11 +247,9 @@ impl Force {
 	}
 }
 
-fn relax_all_using_fire<>(mut tree: Tree) -> Tree { relax_suffix_using_fire(tree, 1, |_| {}) }
-
 // Relaxes the last few atoms on the tree (which can safely be worked with without having
 // to unroot other atoms)
-fn relax_suffix_using_fire<C: FnMut(&Relax)>(mut tree: Tree, n_fixed: usize, mut cb: C) -> Tree {
+fn relax_suffix_using_fire<C: FnMut(&Relax), W:Write>(mut tree: Tree, n_fixed: usize, mut ffile: Option<W>, mut cb: C) -> Tree {
 	let free_indices = (n_fixed..tree.len()).collect_vec();
 
 	// FIXME Params should not be in ::sp2
@@ -275,7 +278,7 @@ fn relax_suffix_using_fire<C: FnMut(&Relax)>(mut tree: Tree, n_fixed: usize, mut
 		//let force_fn = |md| cone_adjusting_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..], 1.41);
 		//let force_fn = |md| zero_forces(md);
 		//let force_fn = |md| new_writer(md, &mut cb, &free_indices[..], tree.dimension, &tree.parents[..], RADIUS_STRENGTH, THETA_STRENGTH, TARGET_RADIUS);
-		let force_fn = |md| morse_writer(md, &mut cb, &free_indices[..], tree.dimension, &tree.parents[..]);
+		let force_fn = |md| morse_writer(md, &mut cb, &free_indices[..], tree.dimension, &tree.parents[..], ffile.as_mut());
 		relax.relax(force_fn)
 	};
 
@@ -672,17 +675,20 @@ fn zero_forces(mut md: Relax) -> Relax {
 	md
 }
 
-fn just_write_forces(mut md: Relax, free_indices: &[usize], dim: Trip<f64>) -> Relax {
+fn just_write_forces<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, mut ffile: Option<W>) -> Relax {
 	let (potential,force) = sp2::calc_potential_flat(md.position.clone(), dim);
 
 	let mut md = zero_forces(md);
 	for i in free_indices {
+		if let Some(file) = ffile.as_mut() {
+			writeln!(file, "REBO {:5} {} {} {}", i, force[3*i], force[3*i+1], force[3*i+2]);
+		}
 		md.force[3*i..3*(i+1)].copy_from_slice(&force[3*i..3*(i+1)]);
 	}
 	md
 }
 
-fn add_morse(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
+fn add_morse<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], mut ffile: Option<W>) -> Relax {
 	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
 	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
 	let apply  = |iso: NaIso, v: (f64,f64,f64)| { from_na_point(iso * to_na_point(v)) };
@@ -728,6 +734,9 @@ fn add_morse(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[u
 		//   transpose matrix of the one that maps x to x'. But for a rotation,
 		//   this is also the inverse.)
 		let f_add = applyV(inv, f_add);
+		if let Some(file) = ffile.as_mut() {
+			writeln!(file, "MOD {:5} {} {} {}", i, f_add.0, f_add.1, f_add.2);
+		}
 
 		let f = tup3(&md.force, i);
 		tup3set(&mut md.force, i, f.add_v(f_add));
@@ -759,9 +768,12 @@ fn cart_from_spherical((r,θ,φ): Trip<f64>) -> Trip<f64> {
 }
 
 // code archeologists: can you figure out the evolutionary history behind this copy pasta?
-fn morse_writer<C: FnMut(&Relax)>(md: Relax, mut cb: C, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
-	let mut md = just_write_forces(md, free_indices, dim);
-	let mut md = add_morse(md, free_indices, dim, parents);
+fn morse_writer<C: FnMut(&Relax), W:Write>(md: Relax, mut cb: C, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], mut ffile: Option<W>) -> Relax {
+	if let Some(file) = ffile.as_mut() {
+		writeln!(file, "STEP {}", md.nstep);
+	}
+	let mut md = just_write_forces(md, free_indices, dim, ffile.as_mut());
+	let mut md = add_morse(md, free_indices, dim, parents, ffile.as_mut());
 	cb(&md);
 	md
 }
@@ -865,7 +877,26 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
 
-	relax_all_using_fire(tree)
+//	let mut file = if XYZ_DEBUG {
+//		let path = format!("xyz-debug/event-start.xyz");
+//		Some(::std::fs::File::create(&path).unwrap())
+//	} else { None };
+	let labels = tree.labels.clone();
+	let mut file = if FORCE_DEBUG {
+		let path = format!("xyz-debug/force-start");
+		Some(::std::fs::File::create(&path).unwrap())
+	} else { None };
+	let mut xyz_debug_file = if XYZ_DEBUG {
+		let path = format!("xyz-debug/event-start.xyz");
+		Some(::std::fs::File::create(&path).unwrap())
+	} else { None };
+	relax_suffix_using_fire(tree, 1, file, |md| {
+		if let Some(file) = xyz_debug_file.as_mut() {
+			let mut pos = unflatten(&md.position);
+			let mut lab = labels.clone();
+			write_xyz_(file, pos, lab.clone(), lab.len());
+		}
+	})
 }
 
 fn center(pos: &Vec<Trip<Cart>>) -> Trip<Cart> {
