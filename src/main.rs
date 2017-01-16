@@ -3,6 +3,7 @@
 
 // FIXME inconsistent usage of DIMENSION and state.dimension
 const DIMENSION: Trip<Float> = (100., 6., 100.);
+const IS_VACUUM: Trip<bool> = (true, false, true);
 const NPARTICLE: usize = 100;
 
 const DEBUG: bool = false;
@@ -20,9 +21,10 @@ enum Force {
 }
 use self::Force::*;
 
-//const RADIUS_MORSE: Morse = Morse { center: 1.41, D: 100., k: 100. };
-const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 0. };
-const THETA_FORCE: Force = Quadratic { center: (120.*PI/180.), k: 0. };
+//const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 0. };
+const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 100. };
+//const RADIUS_FORCE: Force = Quadratic { center: 1.41, k: 100. };
+const THETA_FORCE: Force = Quadratic { center: (120.*PI/180.), k: 100. };
 
 // VM: * Dimer sep should be 1.4 (Angstrom)
 //     * Interaction radius (to begin relaxation) should be 2
@@ -96,7 +98,6 @@ fn dla_run(dee: Dee) -> Tree {
 
 			let n_fixed = n_total - n_free;
 
-			//tree = relax_suffix_using_fire(tree, n_fixed, |md| {
 			let mut xyz_debug_file = if XYZ_DEBUG {
 				// (obviously not the right way to build a path; whatever that way is)
 				let path = format!("xyz-debug/event-{:06}.xyz", dla_step);
@@ -104,6 +105,7 @@ fn dla_run(dee: Dee) -> Tree {
 			} else { None };
 
 			let labels = tree.labels.clone();
+			//tree = relax_suffix_using_fire(tree, n_fixed, |md| {
 			tree = relax_suffix_using_fire(tree, 6, |md| {
 
 				if let Some(file) = xyz_debug_file.as_mut() {
@@ -233,28 +235,19 @@ impl Force {
 			},
 			Morse { center, k, D } => {
 				let a = (k/(2. * D)).sqrt();
-				let f = (-a * (x - center)).exp();
+				let f = (a * (center - x)).exp();
 				2. * a * D * f * (f - 1.)
 			},
 		}
 	}
 }
 
+fn relax_all_using_fire<>(mut tree: Tree) -> Tree { relax_suffix_using_fire(tree, 1, |_| {}) }
+
 // Relaxes the last few atoms on the tree (which can safely be worked with without having
 // to unroot other atoms)
 fn relax_suffix_using_fire<C: FnMut(&Relax)>(mut tree: Tree, n_fixed: usize, mut cb: C) -> Tree {
-	match n_fixed {
-		0 => { return relax_all_using_fire(tree); },
-		1 => { panic!("n_fixed == 1"); }, // a PITA edge case that's pointless anyways
-		n if n == tree.len() => { return tree; },
-		_ => {}
-	};
-
 	let free_indices = (n_fixed..tree.len()).collect_vec();
-
-	// force computation works with [(f64,f64,f64)] and includes all positions;
-	// relaxation works with flattened [f64], and... also now includes all positions.
-	let labels: Vec<_> = tree.labels[n_fixed..].to_vec();
 
 	// FIXME Params should not be in ::sp2
 	let params = ::sp2::Params {
@@ -288,9 +281,9 @@ fn relax_suffix_using_fire<C: FnMut(&Relax)>(mut tree: Tree, n_fixed: usize, mut
 
 	tree.dangerously_reassign_positions(unflatten(&pos));
 
-	for p in &mut tree.pos {
-		*p = reduce_pbc((*p).frac(tree.dimension)).cart(tree.dimension)
-	}
+//	for p in &mut tree.pos {
+//		*p = reduce_pbc((*p).frac(tree.dimension)).cart(tree.dimension)
+//	}
 
 	tree
 }
@@ -661,10 +654,6 @@ where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Label> {
 
 //---------------------------
 
-fn relax_all_using_fire(mut tree: Tree) -> Tree {
-	unimplemented!()
-}
-
 // part of a that is parallel to b
 fn par(a: Trip<f64>, b: Trip<f64>) -> Trip<f64> {
 	let b_norm = b.dot(b).sqrt();
@@ -693,117 +682,11 @@ fn just_write_forces(mut md: Relax, free_indices: &[usize], dim: Trip<f64>) -> R
 	md
 }
 
-fn cancel_something(something: &mut [f64], positions: &[f64], free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) {
-	assert_eq!(parents.len() * 3, positions.len());
-	assert_eq!(parents.len() * 3, something.len());
-
-	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
-	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
-
-	// verify dependencies are in order (parents before children)
-	for (ii,&i) in free_indices.iter().enumerate() {
-		if let Some(jj) = free_indices.iter().position(|&x| x == parents[i]) {
-			assert!(ii > jj);
-		}
-	}
-
-	for &i in free_indices {
-		let j = parents[i];
-
-		let fi = tup3(something, i);
-		let fj = tup3(something, j);
-		let ri = tup3(positions, i);
-		let rj = tup3(positions, j);
-		let dr = nearest_image_sub(ri, rj, dim);
-		let df = fi.sub_v(fj);
-
-		// old (is this right?)
-		let fpar = par(df,dr);
-		let fi = fi.sub_v(fpar);
-
-		// new
-//		let fi = perp(fi,dr).add_v(par(fj,dr));
-
-		tup3set(something, i, fi);
-		tup3set(something, j, fj);
-
-		// dubba check
-		let fi = tup3(something, i);
-		let fj = tup3(something, j);
-		let dr = nearest_image_sub(ri, rj, dim);
-		let df = fi.sub_v(fj);
-		assert!(dr.dot(df).abs() < 1e-8);
-	}
-}
-
-fn add_radius_term(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], strength: f64, target_radius: f64) -> Relax {
-	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
-	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
-
-	// verify dependencies are in order (parents before children)
-	for (ii,&i) in free_indices.iter().enumerate() {
-		if let Some(jj) = free_indices.iter().position(|&x| x == parents[i]) {
-			assert!(ii > jj);
-		}
-	}
-
-	for &i in free_indices {
-		let j = parents[i];
-
-		let ri = tup3(&md.position, i);
-		let rj = tup3(&md.position, j);
-		let dr = nearest_image_sub(ri, rj, dim);
-		let r = dr.sqnorm().sqrt();
-		let f_add = dr.mul_s(2. * strength * (target_radius/r - 1.));
-
-		let f = tup3(&md.force, i);
-
-		tup3set(&mut md.force, i, f.add_v(f_add));
-	}
-	md
-}
-
-/*
-fn add_radius_morse(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
-	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
-	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
-
-	// verify dependencies are in order (parents before children)
-	for (ii,&i) in free_indices.iter().enumerate() {
-		if let Some(jj) = free_indices.iter().position(|&x| x == parents[i]) {
-			assert!(ii > jj);
-		}
-	}
-
-	for &i in free_indices {
-		let ri = tup3(&md.position, i);
-		let rj = tup3(&md.position, parents[i]);
-
-		let dr = nearest_image_sub(ri, rj, dim);
-		let r = dr.sqnorm().sqrt();
-		let r_unit = dr.div_s(r);
-
-		let f_add = r_unit.mul_s(RADIUS_MORSE.force(r));
-		let f = tup3(&md.force, i);
-
-		tup3set(&mut md.force, i, f.add_v(f_add));
-	}
-	md
-}
-*/
-
 fn add_morse(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
 	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
 	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
 	let apply  = |iso: NaIso, v: (f64,f64,f64)| { from_na_point(iso * to_na_point(v)) };
 	let applyV = |iso: NaIso, v: (f64,f64,f64)| { from_na_vector(iso * to_na_vector(v)) };
-
-	// verify dependencies are in order (parents before children)
-	for (ii,&i) in free_indices.iter().enumerate() {
-		if let Some(jj) = free_indices.iter().position(|&x| x == parents[i]) {
-			assert!(ii > jj);
-		}
-	}
 
 	for &i in free_indices {
 		let pi = tup3(&md.position, i);
@@ -832,7 +715,7 @@ fn add_morse(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[u
 
 		// get dat angle
 		let (ri,θi,_) = spherical_from_cart(pi);
-		let r_hat = unit_r_from_cart(pi);
+		let r_hat = normalize(pi);
 		let θ_hat = unit_θ_from_cart(pi);
 
 		// forces
@@ -858,7 +741,7 @@ fn spherical_from_cart((x,y,z): Trip<f64>) -> Trip<f64> {
 	(r, ρ.atan2(z), y.atan2(x))
 }
 
-fn unit_r_from_cart(p: Trip<f64>) -> Trip<f64> {
+fn normalize(p: Trip<f64>) -> Trip<f64> {
 	let r = p.sqnorm().sqrt();
 	p.map(|x| x/r)
 }
@@ -875,199 +758,11 @@ fn cart_from_spherical((r,θ,φ): Trip<f64>) -> Trip<f64> {
 	(r*sinθ*cosφ, r*sinθ*sinφ, r*cosθ)
 }
 
-fn add_theta_term(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], strength: f64, target_angle: f64) -> Relax {
-	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
-	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
-	let apply = |iso: NaIso, v: (f64,f64,f64)| { from_na_point(iso * to_na_point(v)) };
-	let applyV = |iso: NaIso, v: (f64,f64,f64)| { from_na_vector(iso * to_na_vector(v)) };
-
-	// verify dependencies are in order (parents before children)
-	for (ii,&i) in free_indices.iter().enumerate() {
-		if let Some(jj) = free_indices.iter().position(|&x| x == parents[i]) {
-			assert!(ii > jj);
-		}
-	}
-
-	for &i in free_indices {
-		let pi = tup3(&md.position, i);
-		let pj = tup3(&md.position, parents[i]);
-		let pk = tup3(&md.position, parents[parents[i]]);
-
-		// ensure good images
-		let pj = pi.add_v(nearest_image_sub(pj, pi, dim));
-		let pk = pj.add_v(nearest_image_sub(pk, pj, dim));
-
-		// move parent to origin
-		let (pi,pj,pk) = (pi,pj,pk).map(|x| x.sub_v(pj));
-
-		// rotate parent's parent to +z
-		let (_,θk,φk) = spherical_from_cart(pk);
-		let iso = rotate_y(-θk) * rotate_z(-φk);
-		let inv = iso.inverse_transformation();
-		let (pi,pj,pk) = (pi,pj,pk).map(|x| apply(iso, x));
-
-		// are things placed about where we expect?
-		let (_,θk,φk) = spherical_from_cart(pk);
-		assert!(pj.0.abs() < 1e-5, "{}", pj.0);
-		assert!(pj.1.abs() < 1e-5, "{}", pj.1);
-		assert!(pj.2.abs() < 1e-5, "{}", pj.2);
-		assert!(pk.0.abs() < 1e-5, "{}", pk.0);
-		assert!(pk.1.abs() < 1e-5, "{}", pk.1);
-		assert!(pk.2 > 0.,         "{}", pk.2);
-
-		// get dat angle
-//		let (x,y,z) = spherical_from_cart(pi); // XXX
-//		let (x,y,z) = pi; // XXX
-//		let (ri,θi,_) = spherical_from_cart(pi);
-
-		let (x,y,z) = pi;
-		let θ_hat = unit_θ_from_cart(pi);
-		let (ri,θi,_) = spherical_from_cart(pi);
-
-		// force of K (theta - theta_0)^2
-		let prefac = 2. * strength * (target_angle - θi);
-		let f_add = θ_hat.mul_s(prefac);
-
-		// bring f_add back into cartesian.
-		// (note: transformation from  grad' V  to  grad V  is more generally the
-		//   transpose matrix of the one that maps x to x'. But for a rotation,
-		//   this is also the inverse.)
-		let f_add = applyV(inv, f_add);
-
-		let f = tup3(&md.force, i);
-		tup3set(&mut md.force, i, f.add_v(f_add));
-	}
-	md
-}
-
-fn add_centripetal_terms(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
-	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
-	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
-
-	// verify dependencies are in order (parents before children)
-	for (ii,&i) in free_indices.iter().enumerate() {
-		if let Some(jj) = free_indices.iter().position(|&x| x == parents[i]) {
-			assert!(ii > jj);
-		}
-	}
-
-	for &i in free_indices {
-		let j = parents[i];
-
-		let ri = tup3(&md.position, i);
-		let rj = tup3(&md.position, j);
-		let vi = tup3(&md.velocity, i);
-		let vj = tup3(&md.velocity, j);
-		let fi = tup3(&md.force, i);
-		let fj = tup3(&md.force, j);
-		
-		let dr = nearest_image_sub(ri, rj, dim);
-		let dv = vi.sub_v(vj);
-
-		let vsq_tangential = perp(dv, dr).sqnorm();
-		let f_centrip = dr.mul_s(-1.0 * perp(dv, dr).sqnorm() / dr.sqnorm());
-
-		tup3set(&mut md.force, i, fi.add_v(f_centrip));
-	}
-	md
-}
-
-
-fn reset_radii(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> Relax {
-	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
-	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
-
-	for &i in free_indices {
-		let j = parents[i];
-		let ri = tup3(&md.position, i);
-		let rj = tup3(&md.position, j);
-		let dr = nearest_image_sub(ri, rj, dim);
-
-		let dr_norm = dr.sqnorm().sqrt();
-		let dr_unit = dr.div_s(dr_norm);
-
-		let dr = dr_unit.mul_s(0.95 * target_radius + 0.05 * dr_norm);
-		tup3set(&mut md.position, i, rj.add_v(dr));
-	}
-	md
-}
-
-fn adjust_onto_cones(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> Relax {
-	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
-	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
-
-	for &i in free_indices {
-		let ri = tup3(&md.position, i);
-		let rj = tup3(&md.position, parents[i]);
-		let rk = tup3(&md.position, parents[parents[i]]);
-
-		let rcos = (60f64).to_radians().cos()*target_radius;
-		let rsin = (60f64).to_radians().sin()*target_radius;
-
-		// move the valid circle of positions onto the YZ plane with an inverse transform
-		let iso = bond_iso(rj, rk, dim).append_transformation(&translate((rcos,0.,0.)));
-		let inv = iso.inverse_transformation();
-		let ri = from_na_point(inv * to_na_point(ri));
-
-		// move the position onto the nearest point on that circle
-		let ryz = (ri.1,ri.2);
-		let ryz = ryz.div_s(ryz.sqnorm().sqrt()).mul_s(rsin);
-		let ri = (0., ryz.0, ryz.1);
-
-		// transform back
-		let ri = from_na_point(iso * to_na_point(ri));
-		tup3set(&mut md.position, i, ri);
-	}
-	md
-}
-
-
-fn cone_adjusting_force_writer(md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> Relax {
-	let md = adjust_onto_cones(md, free_indices, dim, parents, target_radius);
-	let md = just_write_forces(md, free_indices, dim);
-	md
-}
-
-fn radius_resetting_force_writer(md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], target_radius: f64) -> Relax {
-	let md = reset_radii(md, free_indices, dim, parents, target_radius);
-	let md = just_write_forces(md, free_indices, dim);
-	md
-}
-
-fn force_canceling_force_writer(md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
-	let mut md = just_write_forces(md, free_indices, dim);
-	cancel_something(&mut md.force, &md.position, free_indices, dim, parents);
-	md
-}
-
-fn centripetal_force_writer(md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
-	let mut md = just_write_forces(md, free_indices, dim);
-	cancel_something(&mut md.force, &md.position, free_indices, dim, parents);
-//	cancel_something(&mut md.velocity, &md.position, free_indices, dim, parents);
-	let md = add_centripetal_terms(md, free_indices, dim, parents);
-	md
-}
-
-
-fn new_writer<C: FnMut(&Relax)>(md: Relax, mut cb: C, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], strength1: f64, strength2: f64, target_radius: f64) -> Relax {
-	let mut md = just_write_forces(md, free_indices, dim);
-	let md = add_radius_term(md, free_indices, dim, parents, strength1, target_radius);
-	let mut md = add_theta_term(md, free_indices, dim, parents, strength2, 120f64.to_radians());
-	cb(&md);
-	md
-}
-
 // code archeologists: can you figure out the evolutionary history behind this copy pasta?
 fn morse_writer<C: FnMut(&Relax)>(md: Relax, mut cb: C, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
 	let mut md = just_write_forces(md, free_indices, dim);
 	let mut md = add_morse(md, free_indices, dim, parents);
 	cb(&md);
-	md
-}
-
-fn velocity_canceling_force_writer(md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize]) -> Relax {
-	let mut md = just_write_forces(md, free_indices, dim);
-	cancel_something(&mut md.velocity, &md.position, free_indices, dim, parents);
 	md
 }
 
@@ -1092,28 +787,22 @@ fn flatten<T:Copy>(slice: &[(T,T,T)]) -> Vec<T> {
 
 fn random_direction<R:Rng>(rng: &mut R) -> Trip<Cart> {
 	let normal = Normal::new(0.0, 1.0);
-	let x = normal.ind_sample(rng) as Float;
-	let y = normal.ind_sample(rng) as Float;
-	let z = normal.ind_sample(rng) as Float;
-
-	let vec = (x,y,z);
-	let length = vec.sqnorm().sqrt();
-	vec.map(|x| x / length)
+	normalize(((),(),()).map(|_| normal.ind_sample(rng) as Float))
 }
 
 fn random_border_position<R:Rng>(rng: &mut R) -> Trip<Frac> {
-	// this makes no attempt to be isotropic,
-	// as evidenced by the fact that it works entirely in terms of fractional coords
+	// random point
+	let mut point = ((),(),()).map(|_| Frac(rng.next_f64() as Float));
 
-	// place onto either the i=0 or j=0 face of the cuboid
-	let o = Frac(0.);
-	let x = Frac(rng.next_f64() as Float);
-	let z = Frac(rng.next_f64() as Float);
-	match rng.gen_range(0, 2) {
-		0 => (x, o, z),
-		1 => (o, x, z),
-		_ => unreachable!(),
+	// project onto a vacuum face
+	loop {
+		let k = rng.gen_range(0, 3);
+		if IS_VACUUM.into_nth(k) {
+			*point.mut_nth(k) = Frac(0.);
+			break;
+		}
 	}
+	point
 }
 
 // for debugging the isometries; this should be a barbell shape, with
@@ -1176,9 +865,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
 
-	let pos = sp2::relax_all(tree.pos.clone(), dimension);
-	tree.dangerously_reassign_positions(pos);
-	tree
+	relax_all_using_fire(tree)
 }
 
 fn center(pos: &Vec<Trip<Cart>>) -> Trip<Cart> {

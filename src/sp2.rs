@@ -182,7 +182,9 @@ impl Relax
 			for (p, &v) in izip!(&mut self.position, &self.velocity) { *p = *p + v*self.timestep; }
 			for (v, &f) in izip!(&mut self.velocity, &self.force)    { *v = *v + f*self.timestep; }
 
-			//println!("{:?}", &self.force);
+			// force at new position
+			self = (&mut force_writer)(self);
+
 			if self.should_stop() { break }
 
 			self.step_fire();
