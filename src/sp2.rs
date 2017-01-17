@@ -161,29 +161,42 @@ impl Relax
 		}
 	}
 
+
 	pub fn relax<G>(mut self, mut force_writer: G) -> Vec<f64>
 	where G: FnMut(Self) -> Self
 	{
-		self.nstep = 0; // how refreshingly redundant!
+		self.nstep = 0;
+
+		// Let this function compute forces, giving it full domain over this object.
+		// It must assign stuff to self.force.  Beyond that, it can do whatever it wants,
+		// such as overwriting parameters and other terrible horrible things.
+		// ...huh. This is kind of liberating.
+		self = (&mut force_writer)(self);
+
 		loop {
 			self.nstep += 1;
-
-			// Let this function compute forces, giving it full domain over this object.
-			// It must assign stuff to self.force.  Beyond that, it can do whatever it wants,
-			// such as overwriting parameters and other terrible horrible things.
-			// ...huh. This is kind of liberating.
-			self = (&mut force_writer)(self);
 
 			assert_eq!(self.position.len(), self.velocity.len());
 			assert_eq!(self.velocity.len(), self.force.len());
 
 			//println!("{:?}", &self.force);
 			// MD. (Newton method)
-			for (p, &v) in izip!(&mut self.position, &self.velocity) { *p = *p + v*self.timestep; }
-			for (v, &f) in izip!(&mut self.velocity, &self.force)    { *v = *v + f*self.timestep; }
+//			for (p, &v) in izip!(&mut self.position, &self.velocity) { *p = *p + v*self.timestep; }
+//			for (v, &f) in izip!(&mut self.velocity, &self.force)    { *v = *v + f*self.timestep; }
+			{
+				// verlet
+				let dt = self.timestep;
+				for (p, &v, &f) in izip!(&mut self.position, &self.velocity, &self.force) {
+					*p += v * dt + 0.5 * f * dt * dt;
+				}
 
-			// force at new position
-			self = (&mut force_writer)(self);
+				for (v, &f) in izip!(&mut self.velocity, &self.force) { *v += 0.5 * dt * f; }
+				self = (&mut force_writer)(self);
+				for (v, &f) in izip!(&mut self.velocity, &self.force) { *v += 0.5 * dt * f; }
+			}
+
+//			// force at new position
+//			self = (&mut force_writer)(self);
 
 			if self.should_stop() { break }
 

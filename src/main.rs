@@ -2,7 +2,7 @@
 #![feature(non_ascii_idents)]
 
 // FIXME inconsistent usage of DIMENSION and state.dimension
-const DIMENSION: Trip<Float> = (100., 6., 100.);
+const DIMENSION: Trip<Float> = (75., 75., 75.);
 const IS_VACUUM: Trip<bool> = (true, false, true);
 const NPARTICLE: usize = 100;
 
@@ -25,7 +25,7 @@ use self::Force::*;
 //const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 0. };
 const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 100. };
 //const RADIUS_FORCE: Force = Quadratic { center: 1.41, k: 100. };
-const THETA_FORCE: Force = Quadratic { center: (120.*PI/180.), k: 0. };
+const THETA_FORCE: Force = Quadratic { center: (120.*PI/180.), k: 100. };
 
 // VM: * Dimer sep should be 1.4 (Angstrom)
 //     * Interaction radius (to begin relaxation) should be 2
@@ -718,6 +718,7 @@ fn add_morse<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, par
 		assert!(pk.0.abs() < 1e-5, "{}", pk.0);
 		assert!(pk.1.abs() < 1e-5, "{}", pk.1);
 		assert!(pk.2 > 0.,         "{}", pk.2);
+		assert_eq!(pi, pi);
 
 		// get dat angle
 		let (ri,θi,_) = spherical_from_cart(pi);
@@ -729,17 +730,30 @@ fn add_morse<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, par
 		let f_r = r_hat.mul_s(RADIUS_FORCE.force(ri));
 		let f_add = f_θ.add_v(f_r);
 
+		if let Some(file) = ffile.as_mut() {
+			let f = f_θ;
+			writeln!(file, "AN_ {:5} {} {} {}", i, f.0, f.1, f.2);
+			let f = applyV(inv, f_θ);
+			writeln!(file, "ANG {:5} {} {} {}", i, f.0, f.1, f.2);
+			let f = f_r;
+			writeln!(file, "RA_ {:5} {} {} {}", i, f.0, f.1, f.2);
+			let f = applyV(inv, f_r);
+			writeln!(file, "RAD {:5} {} {} {}", i, f.0, f.1, f.2);
+		}
+
 		// bring f_add back into cartesian.
 		// (note: transformation from  grad' V  to  grad V  is more generally the
 		//   transpose matrix of the one that maps x to x'. But for a rotation,
 		//   this is also the inverse.)
 		let f_add = applyV(inv, f_add);
-		if let Some(file) = ffile.as_mut() {
-			writeln!(file, "MOD {:5} {} {} {}", i, f_add.0, f_add.1, f_add.2);
-		}
 
 		let f = tup3(&md.force, i);
 		tup3set(&mut md.force, i, f.add_v(f_add));
+
+		if free_indices.contains(&parents[i]) && parents[parents[i]] != i { // NOTE: unnecessary O(n^2)
+			let f = tup3(&md.force, parents[i]);
+			tup3set(&mut md.force, parents[i], f.sub_v(f_add));
+		}
 	}
 	md
 }
@@ -756,9 +770,13 @@ fn normalize(p: Trip<f64>) -> Trip<f64> {
 }
 
 fn unit_θ_from_cart((x,y,z): Trip<f64>) -> Trip<f64> {
-	let ρ = (x*x + y*y).sqrt();
-	let r = (ρ*ρ + z*z).sqrt();
-	(x*z/ρ/r, y*z/ρ/r, -ρ/r)
+	// rats, would be safer to compute these from spherical
+	if x == 0. && y == 0. { (z.signum(),0.,0.) }
+	else {
+		let ρ = (x*x + y*y).sqrt();
+		let r = (ρ*ρ + z*z).sqrt();
+		(x*z/ρ/r, y*z/ρ/r, -ρ/r)
+	}
 }
 
 fn cart_from_spherical((r,θ,φ): Trip<f64>) -> Trip<f64> {
@@ -890,7 +908,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 		let path = format!("xyz-debug/event-start.xyz");
 		Some(::std::fs::File::create(&path).unwrap())
 	} else { None };
-	relax_suffix_using_fire(tree, 1, file, |md| {
+	relax_suffix_using_fire(tree, 0, file, |md| {
 		if let Some(file) = xyz_debug_file.as_mut() {
 			let mut pos = unflatten(&md.position);
 			let mut lab = labels.clone();
