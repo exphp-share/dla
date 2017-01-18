@@ -10,11 +10,6 @@ const DEBUG: bool = false;
 const XYZ_DEBUG: bool = true;
 const FORCE_DEBUG: bool = true;
 
-// 1000. for 13 output
-const THETA_STRENGTH:  Float = 100.;
-const RADIUS_STRENGTH: Float = 100.;
-const TARGET_RADIUS: Float = 1.4;
-
 #[derive(PartialEq,Copy,Clone,Debug)]
 enum Force {
 	Morse { center: f64, D: f64, k: f64, },
@@ -26,6 +21,22 @@ use self::Force::*;
 const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 100. };
 //const RADIUS_FORCE: Force = Quadratic { center: 1.41, k: 100. };
 const THETA_FORCE: Force = Quadratic { center: (120.*PI/180.), k: 100. };
+
+const RELAX_PARAMS: ::sp2::Params =
+	::sp2::Params {
+		timestep_start: 1e-3,
+		timestep_max:   0.05,
+		force_tolerance: Some(1e-5),
+		step_limit: Some(40000),
+	//	step_limit: Some(12000),
+//		timestep_start: 1e-6, // 10
+		//timestep_max:   1e-2,
+//		timestep_max:   1e-4,
+		//timestep_start: 1e-7,
+	//	force_tolerance: Some(1e-7),
+		//step_limit: Some(40000),
+		..::sp2::DEFAULT_PARAMS
+	};
 
 // VM: * Dimer sep should be 1.4 (Angstrom)
 //     * Interaction radius (to begin relaxation) should be 2
@@ -52,6 +63,8 @@ fn main() {
 }
 
 fn dla_run(dee: Dee) -> Tree {
+	let PER_STEP = 2;
+
 	let mut tree = hexagon_nucleus(DIMENSION);
 
 	let mut rng = rand::weak_rng();
@@ -60,7 +73,7 @@ fn dla_run(dee: Dee) -> Tree {
 
 	let mut timer = Timer::new(30);
 
-	let final_particles = 2*NPARTICLE + tree.len();
+	let final_particles = PER_STEP*NPARTICLE + tree.len();
 
 	let mut debug_file = ::std::fs::File::create("debug").unwrap();
 
@@ -84,16 +97,31 @@ fn dla_run(dee: Dee) -> Tree {
 			if dee == Dee::Two { pos.1 = Frac(0.5); }
 		}
 
-		{ // make the two angles random
-			let i = state.closest_neighbor(pos, nbr_radius).unwrap();
-			let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
-			let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+		// introduce at random angles
+		match PER_STEP {
+			// dimer
+			2 => {
+				let i = state.closest_neighbor(pos, nbr_radius).unwrap();
+				let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+				let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+			},
+
+			// trimer
+			3 => {
+				let i = state.closest_neighbor(pos, nbr_radius).unwrap();
+				let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+				let r = rng.next_f64()*2.*PI;
+				tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, r);
+				tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, r+PI);
+			},
+
+			_ => panic!(),
 		}
 
 		// HACK to get relaxed positions, ignoring the code in state
 		// (tbh neighbor finding and relaxation should be separated out of state)
-		let mut n_free = 2;
-		{
+		let mut n_free = PER_STEP;
+		let n_relax_steps = {
 			let unrelaxed = tree.pos.clone();
 			let n_total = unrelaxed.len();
 
@@ -109,38 +137,35 @@ fn dla_run(dee: Dee) -> Tree {
 				Some(::std::fs::File::create(&path).unwrap())
 			} else { None };
 
+			let mut n_relax_steps = 0; // prepare for more abominable hax...
+
 			let labels = tree.labels.clone();
-			//tree = relax_suffix_using_fire(tree, n_fixed, |md| {
-			tree = relax_suffix_using_fire(tree, 6, force_debug_file, |md| {
+			//tree = relax_suffix_using_fire(tree, n_fixed, |md| { // relax new
+			tree = relax_suffix_using_fire(tree, 6, force_debug_file, |md| { // relax all XXX
+			//tree = relax_suffix_using_fire(tree, 0, force_debug_file, |md| { // relax all XXX
 
-				if let Some(file) = xyz_debug_file.as_mut() {
-					let mut pos = unflatten(&md.position);
-					let mut lab = labels.clone();
-//					let w = DIMENSION.0;
-//					lab.push("O"); pos.push((0., -1., 0.));
-//					lab.push("O"); pos.push((w, -1., 0.));
-//					lab.push("O"); pos.push((2.*(15. + (md.timestep).ln()), -1., 0.));
-//					lab.push("O"); pos.push((0., -2., 0.));
-//					lab.push("O"); pos.push((w, -2., 0.));
-//					lab.push("O"); pos.push((w * (1. + md.cooldown as f64) / (2. + md.params.inertia_delay as f64), -2., -0.));
-					write_xyz_(file, pos, lab.clone(), lab.len());
+				for file in &mut xyz_debug_file {
+					write_xyz_(file, unflatten(&md.position), labels.clone(), labels.len());
 				}
 
-				if !DEBUG { return }
-
-				writeln!(debug_file, "F {} {} {} {} {}", dla_step, md.nstep, md.alpha, md.timestep, md.cooldown);
-				for i in 0..md.position.len()/3 {
-					let v = (md.velocity[3*i+0], md.velocity[3*i+1], md.velocity[3*i+2]).sqnorm().sqrt();
-					let f = (md.force[3*i+0], md.force[3*i+1], md.force[3*i+2]).sqnorm().sqrt();
-					writeln!(debug_file, "A {} {} {} {:.6} {:.6}", dla_step, md.nstep, i, v, f);
+				if DEBUG {
+					writeln!(debug_file, "F {} {} {} {} {}", dla_step, md.nstep, md.alpha, md.timestep, md.cooldown);
+					for i in 0..md.position.len()/3 {
+						let v = (md.velocity[3*i+0], md.velocity[3*i+1], md.velocity[3*i+2]).sqnorm().sqrt();
+						let f = (md.force[3*i+0], md.force[3*i+1], md.force[3*i+2]).sqnorm().sqrt();
+						writeln!(debug_file, "A {} {} {} {:.6} {:.6}", dla_step, md.nstep, i, v, f);
+					}
 				}
+
+				n_relax_steps = md.nstep; // only the final assigned value will remain
 			});
-		}
+			n_relax_steps
+		};
 
 		// debugging info
 		timer.push();
-		writeln!(stderr(), "({:22},{:22},{:22})  ({:8?} ms)  (avg: {:8?} ms)  (relaxed {:3})",
-			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free
+		writeln!(stderr(), "({:8.6}, {:8.6}, {:8.6})  ({:8?} ms, avg: {:8?})  (relaxed {:3} in {:6})",
+			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free, n_relax_steps
 		).unwrap();
 
 		write_xyz(&mut stdout(), &tree, final_particles);
@@ -252,24 +277,8 @@ impl Force {
 fn relax_suffix_using_fire<C: FnMut(&Relax), W:Write>(mut tree: Tree, n_fixed: usize, mut ffile: Option<W>, mut cb: C) -> Tree {
 	let free_indices = (n_fixed..tree.len()).collect_vec();
 
-	// FIXME Params should not be in ::sp2
-	let params = ::sp2::Params {
-		timestep_start: 1e-3,
-		timestep_max:   0.05,
-		force_tolerance: Some(1e-5),
-		step_limit: Some(4000),
-	//	step_limit: Some(12000),
-//		timestep_start: 1e-6, // 10
-		//timestep_max:   1e-2,
-//		timestep_max:   1e-4,
-		//timestep_start: 1e-7,
-	//	force_tolerance: Some(1e-7),
-		//step_limit: Some(40000),
-		..Default::default()
-	};
-
 	let pos = {
-		let mut relax = sp2::Relax::init(params, flatten(&tree.pos.clone()));
+		let mut relax = sp2::Relax::init(RELAX_PARAMS, flatten(&tree.pos.clone()));
 		//let force_fn = |md| just_write_forces(md, &free_indices[..], tree.dimension);
 		//let force_fn = |md| force_canceling_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..]);
 		//let force_fn = |md| centripetal_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..]);
@@ -319,6 +328,8 @@ use homogenous::numeric::prelude::*;
 use time::precise_time_ns;
 use nalgebra as na;
 use nalgebra::{Rotation as NaRotation, Translation as NaTranslation, Transformation as NaTransformation};
+
+use std::collections::HashSet as Set;
 
 use std::ops::Range;
 use std::io::Write;
@@ -689,15 +700,61 @@ fn just_write_forces<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f
 }
 
 fn add_morse<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], mut ffile: Option<W>) -> Relax {
+	let free_indices: Set<_> = free_indices.iter().cloned().collect();
+
 	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
 	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
+	let tup3add = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| {
+		if free_indices.contains(&i) {
+			let tmp = tup3(&xs, i);
+			tup3set(xs, i, tmp.add_v(v));
+		}
+	};
 	let apply  = |iso: NaIso, v: (f64,f64,f64)| { from_na_point(iso * to_na_point(v)) };
 	let applyV = |iso: NaIso, v: (f64,f64,f64)| { from_na_vector(iso * to_na_vector(v)) };
 
-	for &i in free_indices {
+	let r_pairs = {
+		let mut set = Set::new();
+		for i in 0..parents.len() {
+			let j = parents[i];
+			set.insert((i, j));
+			set.insert((j, i));
+		}
+		set
+	};
+
+	let θ_trips = {
+		let mut set = Set::new();
+		for i in 0..parents.len() {
+			let j = parents[i];
+			let k = parents[j];
+			if i != k {
+				set.insert((i,j,k));
+				set.insert((k,j,i));
+			}
+		}
+		set
+	};
+
+	for (i,j) in r_pairs {
 		let pi = tup3(&md.position, i);
-		let pj = tup3(&md.position, parents[i]);
-		let pk = tup3(&md.position, parents[parents[i]]);
+		let pj = tup3(&md.position, j);
+		let dvec = nearest_image_sub(pi, pj, dim);
+
+		let f = normalize(dvec).mul_s(RADIUS_FORCE.force(dvec.sqnorm().sqrt()));
+
+		if let Some(file) = ffile.as_mut() {
+			writeln!(file, "RAD {} {} {} {} {}", i, j, f.0, f.1, f.2);
+		}
+
+		tup3add(&mut md.force, i, f);
+		tup3add(&mut md.force, j, f.mul_s(-1.));
+	}
+
+	for (i,j,k) in θ_trips {
+		let pi = tup3(&md.position, i);
+		let pj = tup3(&md.position, j);
+		let pk = tup3(&md.position, k);
 
 		let pj = pi.add_v(nearest_image_sub(pj, pi, dim));
 		let pk = pj.add_v(nearest_image_sub(pk, pj, dim));
@@ -721,38 +778,29 @@ fn add_morse<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, par
 		assert_eq!(pi, pi);
 
 		// get dat angle
-		let (ri,θi,_) = spherical_from_cart(pi);
-		let r_hat = normalize(pi);
+		let (_,θi,_) = spherical_from_cart(pi);
 		let θ_hat = unit_θ_from_cart(pi);
 
-		// forces
-		let f_θ = θ_hat.mul_s(THETA_FORCE.force(θi));
-		let f_r = r_hat.mul_s(RADIUS_FORCE.force(ri));
-		let f_add = f_θ.add_v(f_r);
+		// force
+		let f = θ_hat.mul_s(THETA_FORCE.force(θi));
 
 		if let Some(file) = ffile.as_mut() {
-			let f = f_θ;
-			writeln!(file, "AN_ {:5} {} {} {}", i, f.0, f.1, f.2);
-			let f = applyV(inv, f_θ);
-			writeln!(file, "ANG {:5} {} {} {}", i, f.0, f.1, f.2);
-			let f = f_r;
-			writeln!(file, "RA_ {:5} {} {} {}", i, f.0, f.1, f.2);
-			let f = applyV(inv, f_r);
-			writeln!(file, "RAD {:5} {} {} {}", i, f.0, f.1, f.2);
+			writeln!(file, "AN_ {}:{}:{} {} {} {}", i, j, k, f.0, f.1, f.2);
+			let f = applyV(inv, f);
+			writeln!(file, "ANG {}:{}:{} {} {} {}", i, j, k, f.0, f.1, f.2);
 		}
 
-		// bring f_add back into cartesian.
+		// bring force back into cartesian.
 		// (note: transformation from  grad' V  to  grad V  is more generally the
 		//   transpose matrix of the one that maps x to x'. But for a rotation,
 		//   this is also the inverse.)
-		let f_add = applyV(inv, f_add);
+		let f = applyV(inv, f);
 
-		let f = tup3(&md.force, i);
-		tup3set(&mut md.force, i, f.add_v(f_add));
-
-		if free_indices.contains(&parents[i]) && parents[parents[i]] != i { // NOTE: unnecessary O(n^2)
-			let f = tup3(&md.force, parents[i]);
-			tup3set(&mut md.force, parents[i], f.sub_v(f_add));
+		// ultimately, the two outer atoms (i, k) get pulled in similar directions,
+		// and the middle one (j) receives the opposing forces
+		if free_indices.contains(&i) {
+			tup3add(&mut md.force, i, f);
+			tup3add(&mut md.force, j, f.mul_s(-1.));
 		}
 	}
 	md

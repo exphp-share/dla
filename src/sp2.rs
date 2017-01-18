@@ -113,21 +113,18 @@ pub struct Params {
 	pub step_limit: Option<usize>,
 }
 
-impl Default for Params {
-	fn default() -> Params {
-		Params {
-			inertia_delay: 5,
-			timestep_dec: 0.5,
-			timestep_inc: 1.1,
-			alpha_dec: 0.99,
-			alpha_max: 0.1,
-			timestep_start: ::std::f64::NAN,
-			timestep_max: ::std::f64::NAN,
-			force_tolerance: None,
-			step_limit: None,
-		}
-	}
-}
+pub const DEFAULT_PARAMS: Params = Params {
+	inertia_delay: 5,
+	timestep_dec: 0.5,
+	timestep_inc: 1.1,
+	alpha_dec: 0.99,
+	alpha_max: 0.1,
+	timestep_start: ::std::f64::NAN,
+	timestep_max: ::std::f64::NAN,
+	force_tolerance: None,
+	step_limit: None,
+};
+impl Default for Params { fn default() -> Params { DEFAULT_PARAMS } }
 
 // a type that violates every good practice I can possibly think of.
 // let's open the doors to an era of exposed and mutable state!
