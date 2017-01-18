@@ -279,24 +279,11 @@ fn relax_suffix_using_fire<C: FnMut(&Relax), W:Write>(mut tree: Tree, n_fixed: u
 
 	let pos = {
 		let mut relax = sp2::Relax::init(RELAX_PARAMS, flatten(&tree.pos.clone()));
-		//let force_fn = |md| just_write_forces(md, &free_indices[..], tree.dimension);
-		//let force_fn = |md| force_canceling_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..]);
-		//let force_fn = |md| centripetal_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..]);
-		//let force_fn = |md| velocity_canceling_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..]);
-		//let force_fn = |md| radius_resetting_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..], 1.41);
-		//let force_fn = |md| cone_adjusting_force_writer(md, &free_indices[..], tree.dimension, &tree.parents[..], 1.41);
-		//let force_fn = |md| zero_forces(md);
-		//let force_fn = |md| new_writer(md, &mut cb, &free_indices[..], tree.dimension, &tree.parents[..], RADIUS_STRENGTH, THETA_STRENGTH, TARGET_RADIUS);
 		let force_fn = |md| morse_writer(md, &mut cb, &free_indices[..], tree.dimension, &tree.parents[..], ffile.as_mut());
 		relax.relax(force_fn)
 	};
 
 	tree.dangerously_reassign_positions(unflatten(&pos));
-
-//	for p in &mut tree.pos {
-//		*p = reduce_pbc((*p).frac(tree.dimension)).cart(tree.dimension)
-//	}
-
 	tree
 }
 
@@ -327,7 +314,7 @@ use homogenous::prelude::*;
 use homogenous::numeric::prelude::*;
 use time::precise_time_ns;
 use nalgebra as na;
-use nalgebra::{Rotation as NaRotation, Translation as NaTranslation, Transformation as NaTransformation};
+use nalgebra::{Rotation, Translation, Transformation, Transform};
 
 use std::collections::HashSet as Set;
 
@@ -372,34 +359,16 @@ struct Tree {
 	dimension: Trip<Float>,
 }
 
-// get an isometry that maps the origin to a given atom,
-// and maps the x unit vector away from its parent.
-fn bond_iso(pos: Trip<Cart>, parent: Trip<Cart>, dimension: Trip<Float>) -> NaIso {
-	// this implementation... is the result of pure trial and error.
-	// FIXME it is also wrong, as evidenced by the need for various hax in
-	//       the angle-based potential (add_theta_terms)
-	let (x,y,z) = nearest_image_sub(pos, parent, dimension);
-
-	let beta = y.atan2(-z);
-	let na::Point3 {x,y,z} = identity().append_rotation(&na_x(-beta)) * na::Point3 { x:x, y:y, z:z };
-	assert!(y.abs() < 1e-5, "{}", y);
-
-	let alpha = (-z).atan2(x);
-	let na::Point3 {x,y,z} = identity().append_rotation(&na_y(-alpha)) * na::Point3 { x:x, y:y, z:z };
-	assert!(z.abs() < 1e-5, "{}", z);
-
-	let t = x;
-
-	identity()
-		.append_translation(&na_x(t))
-		.append_rotation(&na_y(alpha))
-		.append_rotation(&na_x(beta))
-		.append_translation(&to_na_vector(parent))
+// Get a "look at" isometry; it maps the origin to the eye, and +z towards the target.
+// (The up direction is arbitrarily chosen, without risk of it being invalid)
+fn look_at_pbc(eye: Trip<Cart>, target: Trip<Cart>, dimension: Trip<Float>) -> NaIso {
+	let (_,θ,φ) = spherical_from_cart(nearest_image_sub(target, eye, dimension));
+	translate(eye) * rotate_z(φ) * rotate_y(θ)
 }
 
 impl Tree {
 	fn from_two(dimension: Trip<Float>, length: Cart, labels: (Label,Label)) -> Self {
-		Tree::from_two_pos(dimension, (CART_ORIGIN, (length, 0., 0.)), labels)
+		Tree::from_two_pos(dimension, (CART_ORIGIN, (0., length, 0.)), labels)
 	}
 	fn from_two_pos(dimension: Trip<Float>, pos: (Trip<Cart>, Trip<Cart>), labels: (Label,Label)) -> Self {
 		Tree {
@@ -418,24 +387,16 @@ impl Tree {
 
 	fn len(&self) -> usize { self.labels.len() }
 
-	fn bond_iso(&self, index: usize) -> NaIso {
-		bond_iso(self.pos[index], self.pos[self.parents[index]], self.dimension)
-	}
-
 	fn attach_new(&mut self, parent: usize, label: Label, length: Cart, beta: f64) -> usize {
 		assert!(parent < self.len());
 
-		// NOTE: a.append_something(b) is defined to apply b after a, *chronologically* speaking.
-		// (i.e. reading the matrices right-to-left, assuming they operate on column vectors)
-		let iso = identity()
-			.append_translation(&na_x(length))
-			.append_rotation(&na_y(60f64.to_radians()))
-			.append_rotation(&na_x(beta))
-			.append_transformation(&self.bond_iso(parent))
-			;
-		let na::Vector3 { x, y, z } = iso.translation;
-
-		self.attach_at(parent, label, (x,y,z))
+		// put the parent at the origin and its parent along +Z
+		let iso = look_at_pbc(self.pos[parent], self.pos[self.parents[parent]], self.dimension);
+		// add an atom in this basis
+		let pos = cart_from_spherical((length, 120f64.to_radians(), beta));
+		// back to cartesian
+		let pos = from_na_point(iso * to_na_point(pos));
+		self.attach_at(parent, label, pos)
 	}
 
 	fn attach_at(&mut self, parent: usize, label: Label, point: Trip<Cart>) -> usize {
@@ -936,19 +897,17 @@ fn one_dimer(dimension: Trip<f64>) -> Tree {
 }
 
 fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
+	// HACK meaning of attachment angle is arbitrary (beyond being fixed on a per-atom basis)
+	//  so hardcoded angles are trouble
 	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (LABEL_SILICON, LABEL_SILICON));
-	let i = tree.attach_new(1, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
-	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
-	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
-	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, 0.);
+	let i = tree.attach_new(1, LABEL_SILICON, DIMER_INITIAL_SEP, PI*0.5);
+	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI*0.5);
+	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI*0.5);
+	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI*0.5);
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
 
-//	let mut file = if XYZ_DEBUG {
-//		let path = format!("xyz-debug/event-start.xyz");
-//		Some(::std::fs::File::create(&path).unwrap())
-//	} else { None };
 	let labels = tree.labels.clone();
-	let mut file = if FORCE_DEBUG {
+	let mut force_file = if FORCE_DEBUG {
 		let path = format!("xyz-debug/force-start");
 		Some(::std::fs::File::create(&path).unwrap())
 	} else { None };
@@ -956,7 +915,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 		let path = format!("xyz-debug/event-start.xyz");
 		Some(::std::fs::File::create(&path).unwrap())
 	} else { None };
-	relax_suffix_using_fire(tree, 0, file, |md| {
+	relax_suffix_using_fire(tree, 0, force_file, |md| {
 		if let Some(file) = xyz_debug_file.as_mut() {
 			let mut pos = unflatten(&md.position);
 			let mut lab = labels.clone();
@@ -1020,10 +979,11 @@ fn test_outputs() {
 	let doit = |tree, path| {
 		write_xyz(::std::fs::File::create(path).unwrap(), &tree, tree.len());
 	};
-	doit(hexagon_nucleus(DIMENSION), "hexagon.xyz");
 
 	doit(barbell_nucleus(DIMENSION), "barbell.xyz");
 	doit(random_barbell_nucleus(DIMENSION), "barbell-random.xyz");
+
+	doit(hexagon_nucleus(DIMENSION), "hexagon.xyz");
 
 	let tree = squiggle_nucleus(DIMENSION);
 	doit(tree.clone(), "squiggle.xyz");
