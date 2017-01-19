@@ -1,5 +1,8 @@
 
 #![feature(non_ascii_idents)]
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(non_snake_case)]
 
 // FIXME inconsistent usage of DIMENSION and state.dimension
 const DIMENSION: Trip<Float> = (75., 75., 75.);
@@ -61,11 +64,11 @@ fn main() {
 
 fn dla_run() {
 	let tree = dla_run_();
-	serde_json::to_writer(&mut File::create("xyz-debug/tree.json").unwrap(), &tree);
+	serde_json::to_writer(&mut File::create("xyz-debug/tree.json").unwrap(), &tree).unwrap();
 }
 
 fn run_relax_on(path: &str) {
-	let tree = serde_json::from_reader(&mut File::open("xyz-debug/tree.json").unwrap()).unwrap();
+	let tree = serde_json::from_reader(&mut File::open(path).unwrap()).unwrap();
 	println!("{:?}", tree);
 	run_relax_on_(tree)
 }
@@ -109,7 +112,7 @@ fn dla_run_() -> Tree {
 			2 => {
 				let i = state.closest_neighbor(pos, nbr_radius).unwrap();
 				let i = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
-				let i = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+				let _ = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
 			},
 
 			// trimer
@@ -135,7 +138,7 @@ fn dla_run_() -> Tree {
 			.filter(|&i| tree.labels[i] != Label::Si)
 			// ascending by distance
 			.map(|i| (i, nearest_image_dist_sq(nbrhood_center, tree.pos[i], tree.dimension)))
-			.sorted_by(|&(ia,a), &(ib,b)| a.partial_cmp(&b).unwrap())
+			.sorted_by(|&(_,a), &(_,b)| a.partial_cmp(&b).unwrap())
 			.into_iter().take(RELAX_MAX_PARTICLE_COUNT)
 			.map(|(i,_)| i)
 			.collect_vec()
@@ -155,7 +158,7 @@ fn dla_run_() -> Tree {
 				Some(File::create(&path).unwrap())
 			} else { None };
 
-			let mut force_debug_file = if FORCE_DEBUG {
+			let force_debug_file = if FORCE_DEBUG {
 				let path = format!("xyz-debug/force-{:06}", dla_step);
 				Some(File::create(&path).unwrap())
 			} else { None };
@@ -173,11 +176,11 @@ fn dla_run_() -> Tree {
 				}
 
 				if DEBUG {
-					writeln!(debug_file, "F {} {} {} {} {}", dla_step, md.nstep, md.alpha, md.timestep, md.cooldown);
+					writeln!(debug_file, "F {} {} {} {} {}", dla_step, md.nstep, md.alpha, md.timestep, md.cooldown).unwrap();
 					for i in 0..md.position.len()/3 {
 						let v = (md.velocity[3*i+0], md.velocity[3*i+1], md.velocity[3*i+2]).sqnorm().sqrt();
 						let f = (md.force[3*i+0], md.force[3*i+1], md.force[3*i+2]).sqnorm().sqrt();
-						writeln!(debug_file, "A {} {} {} {:.6} {:.6}", dla_step, md.nstep, i, v, f);
+						writeln!(debug_file, "A {} {} {} {:.6} {:.6}", dla_step, md.nstep, i, v, f).unwrap();
 					}
 				}
 
@@ -204,7 +207,7 @@ fn dla_run_() -> Tree {
 	tree
 }
 
-fn run_relax_on_(mut tree: Tree) {
+fn run_relax_on_(tree: Tree) {
 }
 
 #[derive(Copy,Clone,Debug,PartialEq)]
@@ -243,7 +246,7 @@ fn relax_suffix_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, n_fixed: 
 	relax_using_fire(tree, &free_indices, ffile, cb)
 }
 
-fn relax_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, free_indices: &[usize], mut ffile: Option<W>, mut cb: C) -> ::sp2::StopReason {
+fn relax_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, free_indices: &[usize], ffile: Option<W>, mut cb: C) -> ::sp2::StopReason {
 	let info = compute_force_info(free_indices, &tree.parents);
 	let dim = tree.dimension;
 
@@ -254,12 +257,12 @@ fn relax_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, free_indices: &[
 		.relax(|md| {
 			let mut ffile = ffile.borrow_mut();
 			if let Some(file) = ffile.as_mut() {
-				writeln!(file, "STEP {}", md.nstep);
+				writeln!(file, "STEP {}", md.nstep).unwrap();
 			}
 
-			let mut md = zero_forces(md);
-			let mut md = add_rebo(md, info.free_indices.iter().cloned(), dim, ffile.as_mut());
-			let mut md = add_corrections(md, &info, dim, ffile.as_mut());
+			let md = zero_forces(md);
+			let md = add_rebo(md, info.free_indices.iter().cloned(), dim, ffile.as_mut());
+			let md = add_corrections(md, &info, dim, ffile.as_mut());
 			cb(&md);
 
 			md
@@ -267,7 +270,7 @@ fn relax_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, free_indices: &[
 		// cb that is invoked after fire (so that f_dot_v is known)
 		}, |md| {
 			if let Some(file) = ffile.borrow_mut().as_mut() {
-				writeln!(file, "TOTAL_E {:23.18} F_DOT_V {:23.18} DT {:23.18}", md.potential, md.f_dot_v, md.timestep);
+				writeln!(file, "TOTAL_E {:23.18} F_DOT_V {:23.18} DT {:23.18}", md.potential, md.f_dot_v, md.timestep).unwrap();
 			}
 		})
 	};
@@ -432,8 +435,8 @@ trait ToCart { fn cart(self, dimension: Trip<Float>) -> Trip<Cart>; }
 trait ToFrac { fn frac(self, dimension: Trip<Float>) -> Trip<Frac>; }
 impl ToCart for Trip<Frac> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { zip_with!((self,dimension) |x,d| x.cart(d)) } }
 impl ToFrac for Trip<Cart> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { zip_with!((self,dimension) |x,d| x.frac(d)) } }
-impl ToCart for Trip<Cart> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { self } }
-impl ToFrac for Trip<Frac> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { self } }
+impl ToCart for Trip<Cart> { fn cart(self, _dimension: Trip<Float>) -> Trip<Cart> { self } }
+impl ToFrac for Trip<Frac> { fn frac(self, _dimension: Trip<Float>) -> Trip<Frac> { self } }
 
 // nalgebra interop, but strictly for cartesian
 fn to_na_vector((x,y,z): Trip<Cart>) -> na::Vector3<Float> { na::Vector3 { x: x, y: y, z: z } }
@@ -604,7 +607,7 @@ impl State {
 	}
 }
 
-fn write_xyz<W: Write>(mut file: W, tree: &Tree, final_length: usize) {
+fn write_xyz<W: Write>(file: W, tree: &Tree, final_length: usize) {
 	write_xyz_(file, tree.pos.clone(), tree.labels.clone(), final_length);
 }
 
@@ -616,10 +619,10 @@ where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Label> {
 
 	labels.resize(final_length, Label::C);
 	pos.resize(final_length, first);
-	writeln!(file, "{}", final_length);
-	writeln!(file, "blah blah blah");
+	writeln!(file, "{}", final_length).unwrap();
+	writeln!(file, "blah blah blah").unwrap();
 	for (label, (x,y,z)) in labels.into_iter().zip(pos) {
-		writeln!(file, "{} {} {} {}", label.as_str(), x, y, z);
+		writeln!(file, "{} {} {} {}", label.as_str(), x, y, z).unwrap();
 	}
 }
 
@@ -653,7 +656,7 @@ fn add_rebo<I:IntoIterator<Item=usize>,W:Write>(mut md: Relax, free_indices: I, 
 
 	for i in free_indices {
 		if let Some(file) = ffile.as_mut() {
-			writeln!(file, "REB:{} F= {} {} {}", i, force[3*i], force[3*i+1], force[3*i+2]);
+			writeln!(file, "REB:{} F= {} {} {}", i, force[3*i], force[3*i+1], force[3*i+2]).unwrap();
 		}
 
 		for k in 0..3 {
@@ -726,7 +729,7 @@ fn add_corrections<W:Write>(mut md: Relax, info: &ForceTermInfo, dim: Trip<f64>,
 		let f = normalize(dvec).mul_s(signed_force);
 
 		if let Some(file) = ffile.as_mut() {
-			writeln!(file, "RAD:{}:{} V= {} F= {} {} {}", i, j, potential, f.0, f.1, f.2);
+			writeln!(file, "RAD:{}:{} V= {} F= {} {} {}", i, j, potential, f.0, f.1, f.2).unwrap();
 		}
 
 		md.potential += potential;
@@ -774,7 +777,7 @@ fn add_corrections<W:Write>(mut md: Relax, info: &ForceTermInfo, dim: Trip<f64>,
 		let f = applyV(inv, f);
 
 		if let Some(file) = ffile.as_mut() {
-			writeln!(file, "ANG:{}:{}:{} V= {} F= {} {} {}", i, j, k, potential, f.0, f.1, f.2);
+			writeln!(file, "ANG:{}:{}:{} V= {} F= {} {} {}", i, j, k, potential, f.0, f.1, f.2).unwrap();
 		}
 
 		// Note to self:
@@ -904,7 +907,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
 
 	let labels = tree.labels.clone();
-	let mut force_file = if FORCE_DEBUG {
+	let force_file = if FORCE_DEBUG {
 		let path = format!("xyz-debug/force-start");
 		Some(File::create(&path).unwrap())
 	} else { None };
@@ -922,7 +925,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	});
 
 	match reason {
-		Convergence => tree,
+		::sp2::StopReason::Convergence => tree,
 		x => panic!("could not relax hexagon: {:?}", x),
 	}
 }

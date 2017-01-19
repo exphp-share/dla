@@ -40,7 +40,7 @@ pub fn calc_potential_flat(mut pos: Vec<f64>, dim: Trip<f64>) -> (f64, Vec<f64>)
 	match flag {
 		0 => {},
 		1 => {
-			writeln!(&mut stderr(), "POS {:?}", pos);
+			writeln!(&mut stderr(), "POS {:?}", pos).unwrap();
 			panic!("");
 		},
 		_ => panic!("calc_potential: unexpected flag value: {}", flag),
@@ -87,7 +87,7 @@ pub fn relax(pos: Vec<Trip<Cart>>, fixed: Vec<bool>, dim: Trip<f64>) -> Vec<Trip
 	match flag {
 		0 => {},
 		1 => {
-			writeln!(&mut stderr(), "POS {:?}", pos);
+			writeln!(&mut stderr(), "POS {:?}", pos).unwrap();
 			panic!("");
 		},
 		_ => panic!("calc_potential: unexpected flag value: {}", flag),
@@ -249,7 +249,6 @@ impl Relax
 
 			(&mut post_fire)(&self);
 		}
-		unreachable!()
 	}
 
 	fn stop_reason(&self) -> Option<StopReason> {
