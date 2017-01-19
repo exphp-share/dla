@@ -62,7 +62,9 @@ const CART_ORIGIN: Trip<Cart> = (0., 0., 0.);
 fn main() {
 //	test_outputs();
 //	dla_run_test(Dee::Two);
-	dla_run(Dee::Three);
+	let tree = dla_run(Dee::Three);
+
+	serde_json::to_writer(&mut File::create("xyz-debug/tree.json").unwrap(), &tree);
 }
 
 fn dla_run(dee: Dee) -> Tree {
@@ -78,7 +80,7 @@ fn dla_run(dee: Dee) -> Tree {
 
 	let final_particles = PER_STEP*NPARTICLE + tree.len();
 
-	let mut debug_file = ::std::fs::File::create("debug").unwrap();
+	let mut debug_file = File::create("debug").unwrap();
 
 	for dla_step in 0..NPARTICLE {
 		write!(stderr(), "Particle {:8} of {:8}: ", dla_step, NPARTICLE).unwrap();
@@ -105,17 +107,17 @@ fn dla_run(dee: Dee) -> Tree {
 			// dimer
 			2 => {
 				let i = state.closest_neighbor(pos, nbr_radius).unwrap();
-				let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
-				let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+				let i = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+				let i = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
 			},
 
 			// trimer
 			3 => {
 				let i = state.closest_neighbor(pos, nbr_radius).unwrap();
-				let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+				let i = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
 				let r = rng.next_f64()*2.*PI;
-				tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, r);
-				tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, r+PI);
+				tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, r);
+				tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, r+PI);
 			},
 
 			_ => panic!(),
@@ -129,7 +131,7 @@ fn dla_run(dee: Dee) -> Tree {
 			state.neighborhood(nbrhood_center.frac(tree.dimension), RELAX_NEIGHBORHOOD_RADIUS)
 			.into_iter()
 			.chain(first_new_index..tree.len()) // the new indices are not yet in state
-			.filter(|&i| tree.labels[i] != LABEL_SILICON)
+			.filter(|&i| tree.labels[i] != Label::Si)
 			// ascending by distance
 			.map(|i| (i, nearest_image_dist_sq(nbrhood_center, tree.pos[i], tree.dimension)))
 			.sorted_by(|&(ia,a), &(ib,b)| a.partial_cmp(&b).unwrap())
@@ -149,12 +151,12 @@ fn dla_run(dee: Dee) -> Tree {
 
 			let mut xyz_debug_file = if XYZ_DEBUG {
 				let path = format!("xyz-debug/event-{:06}.xyz", dla_step);
-				Some(::std::fs::File::create(&path).unwrap())
+				Some(File::create(&path).unwrap())
 			} else { None };
 
 			let mut force_debug_file = if FORCE_DEBUG {
 				let path = format!("xyz-debug/force-{:06}", dla_step);
-				Some(::std::fs::File::create(&path).unwrap())
+				Some(File::create(&path).unwrap())
 			} else { None };
 
 			let mut n_relax_steps = 0; // prepare for more abominable hax...
@@ -232,8 +234,8 @@ fn dla_run_test(dee: Dee) -> Tree {
 
 		{ // make the two angles random
 			let i = state.closest_neighbor(pos, nbr_radius).unwrap();
-			let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
-			let i = tree.attach_new(i, LABEL_CARBON, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+			let i = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
+			let i = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
 		}
 
 		// HACK to get relaxed positions, ignoring the code in state
@@ -248,7 +250,7 @@ fn dla_run_test(dee: Dee) -> Tree {
 
 			let oldf = ::sp2::calc_potential(tree.pos.clone(), tree.dimension).1;
 			let oldx = tree.pos.clone();
-			relax_suffix_using_fire(&mut tree, 2, None::<::std::fs::File>, |_| {});
+			relax_suffix_using_fire(&mut tree, 2, None::<File>, |_| {});
 			let newf = ::sp2::calc_potential(tree.pos.clone(), tree.dimension).1;
 			let newx = tree.pos.clone();
 
@@ -350,16 +352,16 @@ fn relax_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, free_indices: &[
 // what a mess I've made; how did we accumulate so many dependencies? O_o
 extern crate time;
 extern crate rand;
-#[macro_use(zip_with)]
-extern crate homogenous;
-#[macro_use(iproduct,izip)]
-extern crate itertools;
-#[macro_use]
-extern crate newtype_ops;
+#[macro_use] extern crate homogenous;
+#[macro_use] extern crate itertools;
+#[macro_use] extern crate newtype_ops;
 extern crate dla_sys;
 extern crate libc;
 extern crate num;
 extern crate nalgebra;
+#[macro_use] extern crate serde_derive;
+extern crate serde_json;
+extern crate serde;
 
 
 mod sp2;
@@ -373,12 +375,14 @@ use homogenous::numeric::prelude::*;
 use time::precise_time_ns;
 use nalgebra as na;
 use nalgebra::{Rotation, Translation, Transformation, Transform};
+use serde::{Serialize,Deserialize};
 
 use std::collections::HashSet as Set;
 
 use std::ops::Range;
 use std::io::Write;
 use std::io::{stderr,stdout};
+use std::fs::File;
 
 use std::f64::consts::PI;
 
@@ -400,17 +404,22 @@ fn na_x(r: Float) -> NaVector3 { na::Vector3{x:r, ..na::zero()} }
 fn na_y(r: Float) -> NaVector3 { na::Vector3{y:r, ..na::zero()} }
 fn na_z(r: Float) -> NaVector3 { na::Vector3{z:r, ..na::zero()} }
 
-// could use an enum but meh
-type Label = &'static str;
-const LABEL_CARBON: Label = "C";
-const LABEL_SILICON: Label = "Si";
+#[derive(Copy,Clone,Eq,PartialEq,Ord,PartialOrd,Hash,Serialize,Deserialize,Debug)]
+enum Label { C, Si }
+impl Label {
+	pub fn as_str(&self) -> &'static str {
+		match *self {
+			Label::C => "C",
+			Label::Si => "Si",
+		}
+	}
+}
 
 //---------------------------------
 
 // NOTE misnomer; not actually a tree; the first two atoms point to each other
-#[derive(Clone)]
+#[derive(Clone,Serialize,Deserialize)]
 struct Tree {
-	// NOTE 'label' is misleading;  These are metadata, not identifiers.
 	labels: Vec<Label>,
 	pos: Vec<Trip<Cart>>,
 	parents: Vec<usize>,
@@ -677,12 +686,12 @@ where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Label> {
 	let mut labels = labels.into_iter().collect_vec();
 	let first = pos[0];
 
-	labels.resize(final_length, LABEL_CARBON);
+	labels.resize(final_length, Label::C);
 	pos.resize(final_length, first);
 	writeln!(file, "{}", final_length);
 	writeln!(file, "blah blah blah");
 	for (label, (x,y,z)) in labels.into_iter().zip(pos) {
-		writeln!(file, "{} {} {} {}", label, x, y, z);
+		writeln!(file, "{} {} {} {}", label.as_str(), x, y, z);
 	}
 }
 
@@ -922,15 +931,15 @@ fn random_border_position<R:Rng>(rng: &mut R) -> Trip<Frac> {
 // for debugging the isometries; this should be a barbell shape, with
 // 4 atoms protruding from each end in 4 diagonal directions
 fn barbell_nucleus(dimension: Trip<f64>) -> Tree {
-	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, ("Si", "C"));
-	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*0.0);
-	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*0.5);
-	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*1.0);
-	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*1.5);
-	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*0.0);
-	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*0.5);
-	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*1.0);
-	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*1.5);
+	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (Label::Si, Label::C));
+	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*0.0);
+	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
+	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*1.0);
+	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*1.5);
+	tree.attach_new(1, Label::C, DIMER_INITIAL_SEP, PI*0.0);
+	tree.attach_new(1, Label::C, DIMER_INITIAL_SEP, PI*0.5);
+	tree.attach_new(1, Label::C, DIMER_INITIAL_SEP, PI*1.0);
+	tree.attach_new(1, Label::C, DIMER_INITIAL_SEP, PI*1.5);
 	tree
 }
 
@@ -938,35 +947,35 @@ fn random_barbell_nucleus(dimension: Trip<f64>) -> Tree {
 	let dir = random_direction(&mut rand::weak_rng());
 	let pos1 = ((),(),()).map(|_| Frac(rand::weak_rng().next_f64())).cart(dimension);
 	let pos2 = pos1.add_v(dir.mul_s(DIMER_INITIAL_SEP));
-	let mut tree = Tree::from_two_pos(dimension, (pos1,pos2), ("Si", "C"));
-	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*0.0);
-	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*0.5);
-	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*1.0);
-	tree.attach_new(0, "Si", DIMER_INITIAL_SEP, PI*1.5);
-	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*0.0);
-	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*0.5);
-	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*1.0);
-	tree.attach_new(1, "C", DIMER_INITIAL_SEP, PI*1.5);
+	let mut tree = Tree::from_two_pos(dimension, (pos1,pos2), (Label::Si, Label::C));
+	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*0.0);
+	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
+	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*1.0);
+	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*1.5);
+	tree.attach_new(1, Label::C, DIMER_INITIAL_SEP, PI*0.0);
+	tree.attach_new(1, Label::C, DIMER_INITIAL_SEP, PI*0.5);
+	tree.attach_new(1, Label::C, DIMER_INITIAL_SEP, PI*1.0);
+	tree.attach_new(1, Label::C, DIMER_INITIAL_SEP, PI*1.5);
 	tree
 }
 
 // for debugging reattachment;
 fn squiggle_nucleus(dimension: Trip<f64>) -> Tree {
-	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, ("Si", "Si"));
+	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (Label::Si, Label::Si));
 	let mut i = 0;
 	for k in 0..16 {
-		i = tree.attach_new(i, "Si", DIMER_INITIAL_SEP, PI*(k as f64)/(16 as f64));
+		i = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*(k as f64)/(16 as f64));
 	}
 	// test on the "ghost" nucleus
 	let mut i = 1;
 	for k in 0..16 {
-		i = tree.attach_new(i, "Si", DIMER_INITIAL_SEP, PI*(k as f64)/(16 as f64));
+		i = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*(k as f64)/(16 as f64));
 	}
 	tree
 }
 
 fn one_dimer(dimension: Trip<f64>) -> Tree {
-	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (LABEL_SILICON, LABEL_SILICON));
+	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (Label::Si, Label::Si));
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
 	tree
 }
@@ -974,21 +983,21 @@ fn one_dimer(dimension: Trip<f64>) -> Tree {
 fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	// HACK meaning of attachment angle is arbitrary (beyond being fixed on a per-atom basis)
 	//  so hardcoded angles are trouble
-	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (LABEL_SILICON, LABEL_SILICON));
-	let i = tree.attach_new(1, LABEL_SILICON, DIMER_INITIAL_SEP, PI*0.5);
-	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI*0.5);
-	let i = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI*0.5);
-	let _ = tree.attach_new(i, LABEL_SILICON, DIMER_INITIAL_SEP, PI*0.5);
+	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (Label::Si, Label::Si));
+	let i = tree.attach_new(1, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
+	let i = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
+	let i = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
+	let _ = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
 
 	let labels = tree.labels.clone();
 	let mut force_file = if FORCE_DEBUG {
 		let path = format!("xyz-debug/force-start");
-		Some(::std::fs::File::create(&path).unwrap())
+		Some(File::create(&path).unwrap())
 	} else { None };
 	let mut xyz_debug_file = if XYZ_DEBUG {
 		let path = format!("xyz-debug/event-start.xyz");
-		Some(::std::fs::File::create(&path).unwrap())
+		Some(File::create(&path).unwrap())
 	} else { None };
 	let reason = relax_suffix_using_fire(&mut tree, 0, force_file, |md| {
 		if let Some(file) = xyz_debug_file.as_mut() {
@@ -1057,7 +1066,7 @@ impl Timer {
 
 fn test_outputs() {
 	let doit = |tree, path| {
-		write_xyz(::std::fs::File::create(path).unwrap(), &tree, tree.len());
+		write_xyz(File::create(path).unwrap(), &tree, tree.len());
 	};
 
 	doit(barbell_nucleus(DIMENSION), "barbell.xyz");
