@@ -43,31 +43,34 @@ const RELAX_PARAMS: ::sp2::Params =
 // VM: * Dimer sep should be 1.4 (Angstrom)
 //     * Interaction radius (to begin relaxation) should be 2
 
-// const CORE_RADIUS: Float = 5.0;
-// const INTRA_CHAIN_SEP: Cart = Cart(1.);
 const RELAX_NEIGHBORHOOD_RADIUS: Cart = 5.;
 const RELAX_MAX_PARTICLE_COUNT: usize = 12;
 const PARTICLE_RADIUS: Cart = 1.;//Cart(0.4);
 const MOVE_RADIUS: Cart = 1.;
 const DIMER_INITIAL_SEP: Cart = 1.4;
 const HEX_INITIAL_RADIUS: Cart = 0.5;
-// const RELAX_FREE_RADIUS: Cart = 10.;
 
 const CART_ORIGIN: Trip<Cart> = (0., 0., 0.);
-// const FRAC_ORIGIN: Trip<Frac> = (Frac(0.), Frac(0.), Frac(0.));
-// const ORIGIN: Trip<Float> = (0., 0., 0.);
-
-// const TARGET_RADIUS: Float = 1.0;
 
 fn main() {
 //	test_outputs();
-//	dla_run_test(Dee::Two);
-	let tree = dla_run(Dee::Three);
+//	dla_run_test();
+//	let tree = dla_run();
+	run_relax_on(&::std::env::args().nth(1).unwrap_or("xyz-debug/tree.json".to_string()));
+}
 
+fn dla_run() {
+	let tree = dla_run_();
 	serde_json::to_writer(&mut File::create("xyz-debug/tree.json").unwrap(), &tree);
 }
 
-fn dla_run(dee: Dee) -> Tree {
+fn run_relax_on(path: &str) {
+	let tree = serde_json::from_reader(&mut File::open("xyz-debug/tree.json").unwrap()).unwrap();
+	println!("{:?}", tree);
+	run_relax_on_(tree)
+}
+
+fn dla_run_() -> Tree {
 	let PER_STEP = 2;
 
 	let mut tree = hexagon_nucleus(DIMENSION);
@@ -98,8 +101,6 @@ fn dla_run(dee: Dee) -> Tree {
 				.mul_s(MOVE_RADIUS).frac(state.dimension);
 
 			pos = reduce_pbc(pos.add_v(disp));
-
-			if dee == Dee::Two { pos.1 = Frac(0.5); }
 		}
 
 		// introduce at random angles
@@ -203,80 +204,7 @@ fn dla_run(dee: Dee) -> Tree {
 	tree
 }
 
-fn dla_run_test(dee: Dee) -> Tree {
-	let mut tree = one_dimer(DIMENSION);
-
-	let mut rng = rand::weak_rng();
-
-	let nbr_radius = MOVE_RADIUS + PARTICLE_RADIUS;
-
-	let mut timer = Timer::new(30);
-
-	let final_particles = 4;
-
-	for dla_step in 0..1 {
-		let mut state = State::from_positions(DIMENSION, tree.pos.clone().into_iter().zip(tree.labels.clone()));
-
-		let mut pos = random_border_position(&mut rng);
-
-		// move until ready to place
-		while state.neighborhood(pos, nbr_radius).is_empty() {
-			//writeln!(stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
-			//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
-
-			let disp = random_direction(&mut rng)
-				.mul_s(MOVE_RADIUS).frac(state.dimension);
-
-			pos = reduce_pbc(pos.add_v(disp));
-
-			if dee == Dee::Two { pos.1 = Frac(0.5); }
-		}
-
-		{ // make the two angles random
-			let i = state.closest_neighbor(pos, nbr_radius).unwrap();
-			let i = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
-			let i = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
-		}
-
-		// HACK to get relaxed positions, ignoring the code in state
-		// (tbh neighbor finding and relaxation should be separated out of state)
-		let n_free = 2;
-		{
-			let unrelaxed = tree.pos.clone();
-			let n_total = unrelaxed.len();
-			let n_fixed = n_total - n_free;
-
-			writeln!(stderr(), "{:?}", distances_from_tree(&tree));
-
-			let oldf = ::sp2::calc_potential(tree.pos.clone(), tree.dimension).1;
-			let oldx = tree.pos.clone();
-			relax_suffix_using_fire(&mut tree, 2, None::<File>, |_| {});
-			let newf = ::sp2::calc_potential(tree.pos.clone(), tree.dimension).1;
-			let newx = tree.pos.clone();
-
-			for (u,v) in izip!(oldf,newf) {
-				let u = u.map(|x| (x*1000.).round()/1000.);
-				let v = v.map(|x| (x*1000.).round()/1000.);
-				writeln!(stderr(), "FORCE {:?} -> {:?}", u, v);
-			}
-			for (u,v) in izip!(oldx,newx) {
-				let u = u.map(|x| (x*1000.).round()/1000.);
-				let v = v.map(|x| (x*1000.).round()/1000.);
-				writeln!(stderr(), "POS   {:?} -> {:?}", u, v);
-			}
-			writeln!(stderr(), "{:?}", distances_from_tree(&tree));
-		}
-
-		write_xyz(&mut stdout(), &tree, final_particles);
-	}
-
-	{
-		let dimension = tree.dimension;
-		let pos = tree.pos.clone().into_iter().map(|x| reduce_pbc(x.frac(dimension)).cart(dimension));
-		write_xyz_(&mut stdout(), pos, tree.labels.clone(), final_particles);
-	}
-	assert_eq!(final_particles, tree.len());
-	tree
+fn run_relax_on_(mut tree: Tree) {
 }
 
 #[derive(Copy,Clone,Debug,PartialEq)]
@@ -418,7 +346,7 @@ impl Label {
 //---------------------------------
 
 // NOTE misnomer; not actually a tree; the first two atoms point to each other
-#[derive(Clone,Serialize,Deserialize)]
+#[derive(Debug,Clone,Serialize,Deserialize)]
 struct Tree {
 	labels: Vec<Label>,
 	pos: Vec<Trip<Cart>>,
@@ -959,21 +887,6 @@ fn random_barbell_nucleus(dimension: Trip<f64>) -> Tree {
 	tree
 }
 
-// for debugging reattachment;
-fn squiggle_nucleus(dimension: Trip<f64>) -> Tree {
-	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (Label::Si, Label::Si));
-	let mut i = 0;
-	for k in 0..16 {
-		i = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*(k as f64)/(16 as f64));
-	}
-	// test on the "ghost" nucleus
-	let mut i = 1;
-	for k in 0..16 {
-		i = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*(k as f64)/(16 as f64));
-	}
-	tree
-}
-
 fn one_dimer(dimension: Trip<f64>) -> Tree {
 	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (Label::Si, Label::Si));
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
@@ -999,10 +912,11 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 		let path = format!("xyz-debug/event-start.xyz");
 		Some(File::create(&path).unwrap())
 	} else { None };
+
 	let reason = relax_suffix_using_fire(&mut tree, 0, force_file, |md| {
 		if let Some(file) = xyz_debug_file.as_mut() {
-			let mut pos = unflatten(&md.position);
-			let mut lab = labels.clone();
+			let pos = unflatten(&md.position);
+			let lab = labels.clone();
 			write_xyz_(file, pos, lab.clone(), lab.len());
 		}
 	});
@@ -1012,36 +926,6 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 		x => panic!("could not relax hexagon: {:?}", x),
 	}
 }
-
-fn center(pos: &Vec<Trip<Cart>>) -> Trip<Cart> {
-	let n = pos.len() as Cart;
-	pos.iter().fold(CART_ORIGIN, |u,&b| u.add_v(b)).div_s(n)
-}
-
-/*
-fn seven_hexagon_nucleus(dimension: Trip<f64>) -> State {
-	let mut pos = hexagon_sites(dimension);
-	pos.sort_by(|&(x,y,_), &(x2,y2,_)| (y.0.atan2(x.0)).partial_cmp(&y2.0.atan2(x2.0)).unwrap());
-
-	let hex_disps = pos.iter().cloned()
-		.cycle().tuple_windows::<(_,_)>().take(6)
-		.map(|(v1,v2)| v1.add_v(v2)).collect_vec();
-
-	for p in ::std::mem::replace(&mut pos, vec![])  {
-		for &d in &hex_disps {
-			pos.push(p.add_v(d));
-		}
-	}
-
-	let pos = remove_overlapping(pos, Cart(1e-4));
-	let pos = recenter_midpoint(pos, dimension);
-	let pos = sp2::relax_all(pos, (0.,0.,0.));
-	let pos = remove_overlapping(pos, Cart(1e-4));
-	let pos = sp2::relax_all(pos, (0.,0.,0.));
-	assert_eq!(pos.len(), 24);
-	State::from_sites(dimension, pos)
-}
-*/
 
 use std::collections::vec_deque::VecDeque;
 struct Timer { deque: VecDeque<u64> }
@@ -1073,13 +957,7 @@ fn test_outputs() {
 	doit(random_barbell_nucleus(DIMENSION), "barbell-random.xyz");
 
 	doit(hexagon_nucleus(DIMENSION), "hexagon.xyz");
-
-	let tree = squiggle_nucleus(DIMENSION);
-	doit(tree.clone(), "squiggle.xyz");
 }
-
-#[derive(Eq,PartialEq,Copy,Clone)]
-enum Dee { Two, Three }
 
 fn distances_from_tree(tree: &Tree) -> Vec<f64> {
 	let mut out = vec![];
