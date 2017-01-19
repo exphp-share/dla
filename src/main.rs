@@ -25,10 +25,13 @@ const THETA_FORCE: Force = Quadratic { center: (120.*PI/180.), k: 100. };
 const RELAX_PARAMS: ::sp2::Params =
 	::sp2::Params {
 		timestep_start: 1e-3,
+//		timestep_start: 0.01,
 		timestep_max:   0.05,
-		force_tolerance: Some(1e-5),
-		step_limit: Some(40000),
-	//	step_limit: Some(12000),
+//		timestep_max:   0.1,
+		//force_tolerance: Some(1e-5),
+		force_tolerance: Some(1e-3),
+	//	step_limit: Some(40000),
+		step_limit: Some(4000),
 //		timestep_start: 1e-6, // 10
 		//timestep_max:   1e-2,
 //		timestep_max:   1e-4,
@@ -43,12 +46,13 @@ const RELAX_PARAMS: ::sp2::Params =
 
 // const CORE_RADIUS: Float = 5.0;
 // const INTRA_CHAIN_SEP: Cart = Cart(1.);
+const RELAX_NEIGHBORHOOD_RADIUS: Cart = 5.;
+const RELAX_MAX_PARTICLE_COUNT: usize = 12;
 const PARTICLE_RADIUS: Cart = 1.;//Cart(0.4);
 const MOVE_RADIUS: Cart = 1.;
 const DIMER_INITIAL_SEP: Cart = 1.4;
 const HEX_INITIAL_RADIUS: Cart = 0.5;
 // const RELAX_FREE_RADIUS: Cart = 10.;
-// const RELAX_NEIGHBORHOOD_FACTOR: f64 = 10.;
 
 const CART_ORIGIN: Trip<Cart> = (0., 0., 0.);
 // const FRAC_ORIGIN: Trip<Frac> = (Frac(0.), Frac(0.), Frac(0.));
@@ -118,14 +122,31 @@ fn dla_run(dee: Dee) -> Tree {
 			_ => panic!(),
 		}
 
+		// HACK find who to relax
+		let free_indices = {
+			let first_new_index = tree.len() - PER_STEP;
+			let nbrhood_center = tree.pos[first_new_index];
+
+			state.neighborhood(nbrhood_center.frac(tree.dimension), RELAX_NEIGHBORHOOD_RADIUS)
+			.into_iter()
+			.chain(first_new_index..tree.len()) // the new indices are not yet in state
+			.filter(|&i| tree.labels[i] != LABEL_SILICON)
+			// ascending by distance
+			.map(|i| (i, nearest_image_dist_sq(nbrhood_center, tree.pos[i], tree.dimension)))
+			.sorted_by(|&(ia,a), &(ib,b)| a.partial_cmp(&b).unwrap())
+			.into_iter().take(RELAX_MAX_PARTICLE_COUNT)
+			.map(|(i,_)| i)
+			.collect_vec()
+		};
+
 		// HACK to get relaxed positions, ignoring the code in state
 		// (tbh neighbor finding and relaxation should be separated out of state)
-		let mut n_free = PER_STEP;
+		let n_free = free_indices.len();
+//		let mut n_free = PER_STEP;
 		let n_relax_steps = {
-			let unrelaxed = tree.pos.clone();
-			let n_total = unrelaxed.len();
+//			let n_total = tree.len();
 
-			let n_fixed = n_total - n_free;
+//			let n_fixed = n_total - n_free;
 
 			let mut xyz_debug_file = if XYZ_DEBUG {
 				let path = format!("xyz-debug/event-{:06}.xyz", dla_step);
@@ -141,8 +162,9 @@ fn dla_run(dee: Dee) -> Tree {
 
 			let labels = tree.labels.clone();
 			//tree = relax_suffix_using_fire(tree, n_fixed, |md| { // relax new
-			tree = relax_suffix_using_fire(tree, 6, force_debug_file, |md| { // relax all XXX
+			//tree = relax_suffix_using_fire(tree, 6, force_debug_file, |md| { // relax all XXX
 			//tree = relax_suffix_using_fire(tree, 0, force_debug_file, |md| { // relax all XXX
+			tree = relax_using_fire(tree, &free_indices, force_debug_file, |md| { // relax all XXX
 
 				for file in &mut xyz_debug_file {
 					write_xyz_(file, unflatten(&md.position), labels.clone(), labels.len());
@@ -164,7 +186,7 @@ fn dla_run(dee: Dee) -> Tree {
 
 		// debugging info
 		timer.push();
-		writeln!(stderr(), "({:8.6}, {:8.6}, {:8.6})  ({:8?} ms, avg: {:8?})  (relaxed {:3} in {:6})",
+		writeln!(stderr(), "({:8.6}, {:8.6}, {:8.6})  ({:5?} ms, avg: {:5?})  (relaxed {:3} in {:6})",
 			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free, n_relax_steps
 		).unwrap();
 
@@ -274,19 +296,23 @@ impl Force {
 
 // Relaxes the last few atoms on the tree (which can safely be worked with without having
 // to unroot other atoms)
-fn relax_suffix_using_fire<C: FnMut(&Relax), W:Write>(mut tree: Tree, n_fixed: usize, mut ffile: Option<W>, mut cb: C) -> Tree {
+fn relax_suffix_using_fire<C: FnMut(&Relax), W:Write>(tree: Tree, n_fixed: usize, ffile: Option<W>, cb: C) -> Tree {
 	let free_indices = (n_fixed..tree.len()).collect_vec();
+	relax_using_fire(tree, &free_indices, ffile, cb)
+}
+
+fn relax_using_fire<C: FnMut(&Relax), W:Write>(mut tree: Tree, free_indices: &[usize], mut ffile: Option<W>, mut cb: C) -> Tree {
+	let info = compute_force_info(free_indices, &tree.parents);
 
 	let pos = {
 		let mut relax = sp2::Relax::init(RELAX_PARAMS, flatten(&tree.pos.clone()));
-		let force_fn = |md| morse_writer(md, &mut cb, &free_indices[..], tree.dimension, &tree.parents[..], ffile.as_mut());
+		let force_fn = |md| morse_writer(md, &mut cb, &info, tree.dimension, ffile.as_mut());
 		relax.relax(force_fn)
 	};
 
 	tree.dangerously_reassign_positions(unflatten(&pos));
 	tree
 }
-
 
 
 // what a mess I've made; how did we accumulate so many dependencies? O_o
@@ -525,6 +551,7 @@ fn update_upper_hint(mut hint: usize, sorted: &[Frac], needle: Frac) -> usize {
 }
 
 //--------------------------
+// FIXME why does state still have labels
 struct State {
 	labels: Vec<Label>,
 	positions: Vec<Trip<Cart>>,
@@ -647,7 +674,7 @@ fn zero_forces(mut md: Relax) -> Relax {
 	md
 }
 
-fn just_write_forces<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, mut ffile: Option<W>) -> Relax {
+fn just_write_forces<I:IntoIterator<Item=usize>,W:Write>(mut md: Relax, free_indices: I, dim: Trip<f64>, mut ffile: Option<W>) -> Relax {
 	let (potential,force) = sp2::calc_potential_flat(md.position.clone(), dim);
 
 	let mut md = zero_forces(md);
@@ -660,13 +687,53 @@ fn just_write_forces<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f
 	md
 }
 
-fn add_morse<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], mut ffile: Option<W>) -> Relax {
+// precomputed info about what r terms and θ terms exist.
+// contains index pairs/triples which are associated with at least one nonzero
+//  term in the correction forces. (taking into account that fixed atoms have zero force)
+struct ForceTermInfo {
+	free_indices: Set<usize>,
+	radial_pairs: Set<Pair<usize>>,
+	angle_triples: Set<Trip<usize>>,
+}
+
+fn compute_force_info(free_indices: &[usize], parents: &[usize]) -> ForceTermInfo {
 	let free_indices: Set<_> = free_indices.iter().cloned().collect();
 
+	let radial_pairs = {
+		let mut set = Set::new();
+		for i in 0..parents.len() {
+			let j = parents[i];
+			if free_indices.contains(&i) { set.insert((i, j)); }
+			if free_indices.contains(&j) { set.insert((j, i)); }
+		}
+		set
+	};
+
+	let angle_triples = {
+		let mut set = Set::new();
+		for i in 0..parents.len() {
+			let j = parents[i];
+			let k = parents[j];
+			if i != k {
+				if free_indices.contains(&i) || free_indices.contains(&j) { set.insert((i,j,k)); }
+				if free_indices.contains(&k) || free_indices.contains(&j) { set.insert((k,j,i)); }
+			}
+		}
+		set
+	};
+
+	ForceTermInfo {
+		free_indices: free_indices,
+		radial_pairs: radial_pairs,
+		angle_triples: angle_triples,
+	}
+}
+
+fn add_corrections<W:Write>(mut md: Relax, info: &ForceTermInfo, dim: Trip<f64>, mut ffile: Option<W>) -> Relax {
 	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
 	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
 	let tup3add = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| {
-		if free_indices.contains(&i) {
+		if info.free_indices.contains(&i) {
 			let tmp = tup3(&xs, i);
 			tup3set(xs, i, tmp.add_v(v));
 		}
@@ -674,30 +741,7 @@ fn add_morse<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, par
 	let apply  = |iso: NaIso, v: (f64,f64,f64)| { from_na_point(iso * to_na_point(v)) };
 	let applyV = |iso: NaIso, v: (f64,f64,f64)| { from_na_vector(iso * to_na_vector(v)) };
 
-	let r_pairs = {
-		let mut set = Set::new();
-		for i in 0..parents.len() {
-			let j = parents[i];
-			set.insert((i, j));
-			set.insert((j, i));
-		}
-		set
-	};
-
-	let θ_trips = {
-		let mut set = Set::new();
-		for i in 0..parents.len() {
-			let j = parents[i];
-			let k = parents[j];
-			if i != k {
-				set.insert((i,j,k));
-				set.insert((k,j,i));
-			}
-		}
-		set
-	};
-
-	for (i,j) in r_pairs {
+	for &(i,j) in &info.radial_pairs {
 		let pi = tup3(&md.position, i);
 		let pj = tup3(&md.position, j);
 		let dvec = nearest_image_sub(pi, pj, dim);
@@ -709,10 +753,9 @@ fn add_morse<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, par
 		}
 
 		tup3add(&mut md.force, i, f);
-		tup3add(&mut md.force, j, f.mul_s(-1.));
 	}
 
-	for (i,j,k) in θ_trips {
+	for &(i,j,k) in &info.angle_triples {
 		let pi = tup3(&md.position, i);
 		let pj = tup3(&md.position, j);
 		let pk = tup3(&md.position, k);
@@ -759,10 +802,8 @@ fn add_morse<W:Write>(mut md: Relax, free_indices: &[usize], dim: Trip<f64>, par
 
 		// ultimately, the two outer atoms (i, k) get pulled in similar directions,
 		// and the middle one (j) receives the opposing forces
-		if free_indices.contains(&i) {
-			tup3add(&mut md.force, i, f);
-			tup3add(&mut md.force, j, f.mul_s(-1.));
-		}
+		tup3add(&mut md.force, i, f);
+		tup3add(&mut md.force, j, f.mul_s(-1.));
 	}
 	md
 }
@@ -795,12 +836,12 @@ fn cart_from_spherical((r,θ,φ): Trip<f64>) -> Trip<f64> {
 }
 
 // code archeologists: can you figure out the evolutionary history behind this copy pasta?
-fn morse_writer<C: FnMut(&Relax), W:Write>(md: Relax, mut cb: C, free_indices: &[usize], dim: Trip<f64>, parents: &[usize], mut ffile: Option<W>) -> Relax {
+fn morse_writer<C: FnMut(&Relax), W:Write>(md: Relax, mut cb: C, info: &ForceTermInfo, dim: Trip<f64>, mut ffile: Option<W>) -> Relax {
 	if let Some(file) = ffile.as_mut() {
 		writeln!(file, "STEP {}", md.nstep);
 	}
-	let mut md = just_write_forces(md, free_indices, dim, ffile.as_mut());
-	let mut md = add_morse(md, free_indices, dim, parents, ffile.as_mut());
+	let mut md = just_write_forces(md, info.free_indices.iter().cloned(), dim, ffile.as_mut());
+	let mut md = add_corrections(md, &info, dim, ffile.as_mut());
 	cb(&md);
 	md
 }
@@ -968,10 +1009,10 @@ impl Timer {
 		self.deque.push_back(precise_time_ns());
 	}
 	pub fn last_ms(&self) -> u64 {
-		(self.deque[self.deque.len()-1] - self.deque[self.deque.len()-2]) / 1000
+		(self.deque[self.deque.len()-1] - self.deque[self.deque.len()-2]) / 1_000_000
 	}
 	pub fn average_ms(&self) -> u64 {
-		(self.deque[self.deque.len()-1] - self.deque[0]) / ((self.deque.len() as u64 - 1) * 1000)
+		(self.deque[self.deque.len()-1] - self.deque[0]) / ((self.deque.len() as u64 - 1) * 1_000_000)
 	}
 }
 
