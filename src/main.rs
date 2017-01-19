@@ -14,31 +14,29 @@ const FORCE_DEBUG: bool = true;
 enum Force {
 	Morse { center: f64, D: f64, k: f64, },
 	Quadratic { center: f64, k: f64, },
+	Zero,
 }
-use self::Force::*;
 
-//const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 0. };
-const RADIUS_FORCE: Force = Morse { center: 1.41, D: 100., k: 100. };
-//const RADIUS_FORCE: Force = Quadratic { center: 1.41, k: 100. };
-const THETA_FORCE: Force = Quadratic { center: (120.*PI/180.), k: 100. };
+//const RADIUS_FORCE: Force = Force::Morse { center: 1.41, D: 100., k: 0. };
+//const RADIUS_FORCE: Force = Force::Quadratic { center: 1.41, k: 100. };
+
+const RADIUS_FORCE: Force = Force::Morse { center: 1.41, D: 100., k: 100. };
+const THETA_FORCE: Force = Force::Quadratic { center: (120.*PI/180.), k: 100. };
+const USE_REBO: bool = true;
+
+//const RADIUS_FORCE: Force = Force::Zero;
+//const THETA_FORCE: Force = Force::Zero;
 
 const RELAX_PARAMS: ::sp2::Params =
 	::sp2::Params {
 		timestep_start: 1e-3,
-//		timestep_start: 0.01,
 		timestep_max:   0.05,
-//		timestep_max:   0.1,
-		//force_tolerance: Some(1e-5),
-		force_tolerance: Some(1e-3),
-	//	step_limit: Some(40000),
+//		timestep_start: 1e-2,
+//		timestep_max:   0.15,
+		force_tolerance: Some(1e-5),
 		step_limit: Some(4000),
-		flail_step_limit: Some(200),
-//		timestep_start: 1e-6, // 10
-		//timestep_max:   1e-2,
-//		timestep_max:   1e-4,
-		//timestep_start: 1e-7,
-	//	force_tolerance: Some(1e-7),
-		//step_limit: Some(40000),
+		flail_step_limit: Some(10),
+		turn_condition: ::sp2::TurnCondition::Potential,
 		..::sp2::DEFAULT_PARAMS
 	};
 
@@ -286,13 +284,13 @@ impl Force {
 	fn data(self: Force, x: f64) -> ForceOut {
 		let square = |x| x*x;
 		match self {
-			Quadratic { center, k, } => {
+			Force::Quadratic { center, k, } => {
 				ForceOut {
 					potential: k * square(center - x),
 					force:     2. * k * (center - x),
 				}
 			},
-			Morse { center, k, D } => {
+			Force::Morse { center, k, D } => {
 				let a = (k/(2. * D)).sqrt();
 				let f = (a * (center - x)).exp();
 				ForceOut {
@@ -300,6 +298,7 @@ impl Force {
 					force:     2. * a * D * f * (f - 1.),
 				}
 			},
+			Force::Zero => { ForceOut { potential: 0., force: 0. } },
 		}
 	}
 
@@ -338,7 +337,7 @@ fn relax_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, free_indices: &[
 		// cb that is invoked after fire (so that f_dot_v is known)
 		}, |md| {
 			if let Some(file) = ffile.borrow_mut().as_mut() {
-				writeln!(file, "TOTAL_E {:23.18} F_DOT_V {:23.18} DT {:23.18}", md.potential, md.debug_f_dot_v, md.timestep);
+				writeln!(file, "TOTAL_E {:23.18} F_DOT_V {:23.18} DT {:23.18}", md.potential, md.f_dot_v, md.timestep);
 			}
 		})
 	};
@@ -408,10 +407,10 @@ const LABEL_SILICON: Label = "Si";
 
 //---------------------------------
 
-// FIXME misnomer; not actually a tree; the first two atoms point to each other
+// NOTE misnomer; not actually a tree; the first two atoms point to each other
 #[derive(Clone)]
 struct Tree {
-	// FIXME 'label' is misleading;  These are metadata, not identifiers.
+	// NOTE 'label' is misleading;  These are metadata, not identifiers.
 	labels: Vec<Label>,
 	pos: Vec<Trip<Cart>>,
 	parents: Vec<usize>,
@@ -709,6 +708,8 @@ fn zero_forces(mut md: Relax) -> Relax {
 }
 
 fn add_rebo<I:IntoIterator<Item=usize>,W:Write>(mut md: Relax, free_indices: I, dim: Trip<f64>, mut ffile: Option<W>) -> Relax {
+	if !USE_REBO { return md; }
+
 	let (potential,force) = sp2::calc_potential_flat(md.position.clone(), dim);
 
 	md.potential += potential;

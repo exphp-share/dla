@@ -109,6 +109,7 @@ pub struct Params {
 	pub timestep_max: f64,
 	pub timestep_inc: f64,
 	pub timestep_dec: f64,
+	pub turn_condition: TurnCondition,
 	pub force_tolerance: Option<f64>,
 	pub step_limit: Option<usize>,
 	pub flail_step_limit: Option<usize>,
@@ -122,6 +123,7 @@ pub const DEFAULT_PARAMS: Params = Params {
 	alpha_max: 0.1,
 	timestep_start: ::std::f64::NAN,
 	timestep_max: ::std::f64::NAN,
+	turn_condition: TurnCondition::FDotV,
 	force_tolerance: None,
 	step_limit: None,
 	flail_step_limit: None,
@@ -132,6 +134,10 @@ impl Default for Params { fn default() -> Params { DEFAULT_PARAMS } }
 // let's open the doors to an era of exposed and mutable state!
 // mayhaps, for once, I'll get something done.
 pub struct Relax {
+	// NOTE: Options are used for things that *could* have been local variables in a loop,
+	//       but have been promoted to member variables for some awful reason
+	//       (e.g. debug). The Option makes it ever so slightly easier to detect
+	//       use before proper initialization.
 	pub params: Params,
 	pub position: Vec<f64>,
 	pub velocity: Vec<f64>,
@@ -143,7 +149,11 @@ pub struct Relax {
 	pub potential: f64, // mostly an accumulator for debug, but also part of a stop condition
 	pub min_potential: f64,
 	pub time_since_min_potential: usize,
-	pub debug_f_dot_v: f64, // this is also only saved for debug output
+	pub f_dot_v: f64, // this is also only saved for debug output
+
+	// used for TurnCondition::Potential
+	pub prev_position:  Vec<f64>,
+	pub prev_potential: f64,
 }
 
 #[derive(Debug,Copy,Clone,Eq,PartialEq,PartialOrd,Ord,Hash)]
@@ -151,6 +161,15 @@ pub enum StopReason {
 	Convergence,
 	Timeout,
 	Flailing,
+}
+
+// Standard FIRE has a "turning" condition defined in terms of F dot v,
+// which seems to be at best an approximation of how potential will change.
+// If we do actually compute potential, then we might as well use it.
+#[derive(Debug,Copy,Clone,Eq,PartialEq,PartialOrd,Ord,Hash)]
+pub enum TurnCondition {
+	FDotV,
+	Potential,
 }
 
 impl Relax
@@ -161,16 +180,22 @@ impl Relax
 		Relax {
 			velocity: vec![0.; position.len()],
 			force:    vec![0.; position.len()],
-			position: position,
+			position: position.clone(),
 			timestep: params.timestep_start,
 			alpha: params.alpha_max,
 			cooldown: 0,
 			nstep: 0,
 			params: params,
-			potential: 0.,
+			potential: ::std::f64::INFINITY,
+
+			// used by turning conditions and debug
 			min_potential: ::std::f64::INFINITY,
 			time_since_min_potential: 0,
-			debug_f_dot_v: 0.,
+			f_dot_v: 0.,
+
+			// used for TurnCondition::Potential
+			prev_position:  position,
+			prev_potential: ::std::f64::INFINITY,
 		}
 	}
 
@@ -192,6 +217,10 @@ impl Relax
 
 			assert_eq!(self.position.len(), self.velocity.len());
 			assert_eq!(self.velocity.len(), self.force.len());
+
+			// one of the turning conditions uses this data
+			self.prev_position = self.position.clone();
+			self.prev_potential = self.potential;
 
 			{ // verlet
 				let dt = self.timestep;
@@ -262,15 +291,26 @@ impl Relax
 			*v = (1. - self.alpha) * *v + self.alpha * f * v_norm/f_norm;
 		}
 
-		self.debug_f_dot_v = f_dot_v;
+		self.f_dot_v = f_dot_v;
 
 		// don't go uphill
-		if f_dot_v < 0. {
+		let should_turn = match self.params.turn_condition {
+			TurnCondition::FDotV => f_dot_v < 0.,
+			TurnCondition::Potential => self.prev_potential < self.potential,
+		};
+
+		if should_turn {
 			self.timestep = self.timestep * self.params.timestep_dec;
 			self.alpha = self.params.alpha_max;
 			self.cooldown = self.params.inertia_delay;
 			self.velocity.resize(0,                0.);
 			self.velocity.resize(self.force.len(), 0.);
+
+			if self.params.turn_condition == TurnCondition::Potential {
+				// ohgodwhatahack
+				// (FIRE does not typically even USE position)
+				self.position.copy_from_slice(&self.prev_position);
+			}
 
 		// start gaining inertia after a while downhill
 		} else {
