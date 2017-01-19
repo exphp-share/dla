@@ -111,6 +111,7 @@ pub struct Params {
 	pub timestep_dec: f64,
 	pub force_tolerance: Option<f64>,
 	pub step_limit: Option<usize>,
+	pub flail_step_limit: Option<usize>,
 }
 
 pub const DEFAULT_PARAMS: Params = Params {
@@ -123,6 +124,7 @@ pub const DEFAULT_PARAMS: Params = Params {
 	timestep_max: ::std::f64::NAN,
 	force_tolerance: None,
 	step_limit: None,
+	flail_step_limit: None,
 };
 impl Default for Params { fn default() -> Params { DEFAULT_PARAMS } }
 
@@ -138,11 +140,17 @@ pub struct Relax {
 	pub alpha:    f64,
 	pub cooldown: u32,
 	pub nstep:    usize,
-	// (FIRE itself doesn't actually use potential, it's just that this was the easiest
-	//  place to put an accumulator for debug output)
-	// (in case you haven't noticed, the theme of this code base is "absolute mayhem")
-	pub debug_potential: f64,
+	pub potential: f64, // mostly an accumulator for debug, but also part of a stop condition
+	pub min_potential: f64,
+	pub time_since_min_potential: usize,
 	pub debug_f_dot_v: f64, // this is also only saved for debug output
+}
+
+#[derive(Debug,Copy,Clone,Eq,PartialEq,PartialOrd,Ord,Hash)]
+pub enum StopReason {
+	Convergence,
+	Timeout,
+	Flailing,
 }
 
 impl Relax
@@ -150,7 +158,6 @@ impl Relax
 	pub fn init(params: Params, position: Vec<f64>) -> Self {
 		assert!(!params.timestep_start.is_nan());
 		assert!(!params.timestep_max.is_nan());
-		assert!(params.force_tolerance.is_some() || params.step_limit.is_some(), "no stop condition");
 		Relax {
 			velocity: vec![0.; position.len()],
 			force:    vec![0.; position.len()],
@@ -160,19 +167,22 @@ impl Relax
 			cooldown: 0,
 			nstep: 0,
 			params: params,
-			debug_potential: 0.,
+			potential: 0.,
+			min_potential: ::std::f64::INFINITY,
+			time_since_min_potential: 0,
 			debug_f_dot_v: 0.,
 		}
 	}
 
 
-	pub fn relax<G,H>(mut self, mut force_writer: G, mut post_fire: H) -> Vec<f64>
+	pub fn relax<G,H>(mut self, mut force_writer: G, mut post_fire: H) -> (Vec<f64>, StopReason)
 	where G: FnMut(Self) -> Self, H: FnMut(&Self)
 	{
 		self.nstep = 0;
 
 		// Let this function compute forces, giving it full domain over this object.
-		// It must assign stuff to self.force.  Beyond that, it can do whatever it wants,
+		// It must assign stuff to self.force. If the "flailing" stop condition is used
+		// it must also write to self.potential. Beyond that, it can do whatever it wants,
 		// such as overwriting parameters and other terrible horrible things.
 		// ...huh. This is kind of liberating.
 		self = (&mut force_writer)(self);
@@ -194,33 +204,53 @@ impl Relax
 				for (v, &f) in izip!(&mut self.velocity, &self.force) { *v += 0.5 * dt * f; }
 			}
 
-			if self.should_stop() { break }
+			// this data is used by one of the stop conditions
+			if self.potential < self.min_potential {
+				self.min_potential = self.potential;
+				self.time_since_min_potential = 0;
+			} else {
+				self.time_since_min_potential += 1;
+			}
+
+			if let Some(reason) = self.stop_reason() {
+				return (self.position, reason);
+			}
 
 			self.step_fire();
 
 			(&mut post_fire)(&self);
 		}
-
-		self.position
+		unreachable!()
 	}
 
-	fn should_stop(&self) -> bool {
-		let fsqnorm: f64 = self.force.iter().map(|&x| x*x).sum();
-		assert!(fsqnorm == fsqnorm);
+	fn stop_reason(&self) -> Option<StopReason> {
+		let mut has_stop_cond = false;
 
 		if let Some(tol) = self.params.force_tolerance {
+			has_stop_cond = true;
+			let fsqnorm: f64 = self.force.iter().map(|&x| x*x).sum();
+			assert!(fsqnorm == fsqnorm);
 			if fsqnorm <= tol {
-				return true;
+				return Some(StopReason::Convergence);
 			}
 		}
 
 		if let Some(limit) = self.params.step_limit {
+			has_stop_cond = true;
 			if self.nstep >= limit {
-				return true;
+				return Some(StopReason::Timeout);
 			}
 		}
 
-		false
+		if let Some(limit) = self.params.flail_step_limit {
+			has_stop_cond = true;
+			if self.time_since_min_potential >= limit {
+				return Some(StopReason::Flailing);
+			}
+		}
+
+		assert!(has_stop_cond, "no stop condition");
+		None
 	}
 
 	fn step_fire(&mut self) {

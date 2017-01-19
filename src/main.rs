@@ -32,6 +32,7 @@ const RELAX_PARAMS: ::sp2::Params =
 		force_tolerance: Some(1e-3),
 	//	step_limit: Some(40000),
 		step_limit: Some(4000),
+		flail_step_limit: Some(200),
 //		timestep_start: 1e-6, // 10
 		//timestep_max:   1e-2,
 //		timestep_max:   1e-4,
@@ -143,7 +144,7 @@ fn dla_run(dee: Dee) -> Tree {
 		// (tbh neighbor finding and relaxation should be separated out of state)
 		let n_free = free_indices.len();
 //		let mut n_free = PER_STEP;
-		let n_relax_steps = {
+		let (n_relax_steps, stop_reason) = {
 //			let n_total = tree.len();
 
 //			let n_fixed = n_total - n_free;
@@ -161,10 +162,10 @@ fn dla_run(dee: Dee) -> Tree {
 			let mut n_relax_steps = 0; // prepare for more abominable hax...
 
 			let labels = tree.labels.clone();
-			//tree = relax_suffix_using_fire(tree, n_fixed, |md| { // relax new
-			//tree = relax_suffix_using_fire(tree, 6, force_debug_file, |md| { // relax all XXX
-			//tree = relax_suffix_using_fire(tree, 0, force_debug_file, |md| { // relax all XXX
-			tree = relax_using_fire(tree, &free_indices, force_debug_file, |md| { // relax all XXX
+			//relax_suffix_using_fire(&mut tree, n_fixed, |md| { // relax new
+			//relax_suffix_using_fire(&mut tree, 6, force_debug_file, |md| { // relax all XXX
+			//relax_suffix_using_fire(&mut tree, 0, force_debug_file, |md| { // relax all XXX
+			let reason = relax_using_fire(&mut tree, &free_indices, force_debug_file, |md| { // relax all XXX
 
 				for file in &mut xyz_debug_file {
 					write_xyz_(file, unflatten(&md.position), labels.clone(), labels.len());
@@ -181,13 +182,13 @@ fn dla_run(dee: Dee) -> Tree {
 
 				n_relax_steps = md.nstep; // only the final assigned value will remain
 			});
-			n_relax_steps
+			(n_relax_steps, reason)
 		};
 
 		// debugging info
 		timer.push();
-		writeln!(stderr(), "({:8.6}, {:8.6}, {:8.6})  ({:5?} ms, avg: {:5?})  (relaxed {:3} in {:6})",
-			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free, n_relax_steps
+		writeln!(stderr(), "({:8.6}, {:8.6}, {:8.6})  ({:5?} ms, avg: {:5?})  (relaxed {:3} in {:6} after {:?})",
+			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free, n_relax_steps, stop_reason
 		).unwrap();
 
 		write_xyz(&mut stdout(), &tree, final_particles);
@@ -249,7 +250,7 @@ fn dla_run_test(dee: Dee) -> Tree {
 
 			let oldf = ::sp2::calc_potential(tree.pos.clone(), tree.dimension).1;
 			let oldx = tree.pos.clone();
-			tree = relax_suffix_using_fire(tree, 2, None::<::std::fs::File>, |_| {});
+			relax_suffix_using_fire(&mut tree, 2, None::<::std::fs::File>, |_| {});
 			let newf = ::sp2::calc_potential(tree.pos.clone(), tree.dimension).1;
 			let newx = tree.pos.clone();
 
@@ -308,17 +309,17 @@ impl Force {
 
 // Relaxes the last few atoms on the tree (which can safely be worked with without having
 // to unroot other atoms)
-fn relax_suffix_using_fire<C: FnMut(&Relax), W:Write>(tree: Tree, n_fixed: usize, ffile: Option<W>, cb: C) -> Tree {
+fn relax_suffix_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, n_fixed: usize, ffile: Option<W>, cb: C) -> ::sp2::StopReason {
 	let free_indices = (n_fixed..tree.len()).collect_vec();
 	relax_using_fire(tree, &free_indices, ffile, cb)
 }
 
-fn relax_using_fire<C: FnMut(&Relax), W:Write>(mut tree: Tree, free_indices: &[usize], mut ffile: Option<W>, mut cb: C) -> Tree {
+fn relax_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, free_indices: &[usize], mut ffile: Option<W>, mut cb: C) -> ::sp2::StopReason {
 	let info = compute_force_info(free_indices, &tree.parents);
 	let dim = tree.dimension;
 
 	let ffile = ::std::cell::RefCell::new(ffile);
-	let pos = {
+	let (pos,reason) = {
 		sp2::Relax::init(RELAX_PARAMS, flatten(&tree.pos.clone()))
 		// cb to write forces before fire
 		.relax(|md| {
@@ -337,13 +338,13 @@ fn relax_using_fire<C: FnMut(&Relax), W:Write>(mut tree: Tree, free_indices: &[u
 		// cb that is invoked after fire (so that f_dot_v is known)
 		}, |md| {
 			if let Some(file) = ffile.borrow_mut().as_mut() {
-				writeln!(file, "TOTAL_E {:23.18} F_DOT_V {:23.18} DT {:23.18}", md.debug_potential, md.debug_f_dot_v, md.timestep);
+				writeln!(file, "TOTAL_E {:23.18} F_DOT_V {:23.18} DT {:23.18}", md.potential, md.debug_f_dot_v, md.timestep);
 			}
 		})
 	};
 
 	tree.dangerously_reassign_positions(unflatten(&pos));
-	tree
+	reason
 }
 
 
@@ -701,7 +702,7 @@ fn perp(a: Trip<f64>, b: Trip<f64>) -> Trip<f64> {
 }
 
 fn zero_forces(mut md: Relax) -> Relax {
-	md.debug_potential = 0.;
+	md.potential = 0.;
 	md.force.resize(0, 0.);
 	md.force.resize(md.position.len(), 0.);
 	md
@@ -710,7 +711,7 @@ fn zero_forces(mut md: Relax) -> Relax {
 fn add_rebo<I:IntoIterator<Item=usize>,W:Write>(mut md: Relax, free_indices: I, dim: Trip<f64>, mut ffile: Option<W>) -> Relax {
 	let (potential,force) = sp2::calc_potential_flat(md.position.clone(), dim);
 
-	md.debug_potential += potential;
+	md.potential += potential;
 
 	for i in free_indices {
 		if let Some(file) = ffile.as_mut() {
@@ -790,7 +791,7 @@ fn add_corrections<W:Write>(mut md: Relax, info: &ForceTermInfo, dim: Trip<f64>,
 			writeln!(file, "RAD:{}:{} V= {} F= {} {} {}", i, j, potential, f.0, f.1, f.2);
 		}
 
-		md.debug_potential += potential;
+		md.potential += potential;
 		tup3add(&mut md.force, i, f);
 	}
 
@@ -841,7 +842,7 @@ fn add_corrections<W:Write>(mut md: Relax, info: &ForceTermInfo, dim: Trip<f64>,
 		// Note to self:
 		// Yes, it is correct for the potential to always be added once,
 		// regardless of how many of the atoms are fixed.
-		md.debug_potential += potential;
+		md.potential += potential;
 
 		// ultimately, the two outer atoms (i, k) get pulled in similar directions,
 		// and the middle one (j) receives the opposing forces
@@ -988,13 +989,18 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 		let path = format!("xyz-debug/event-start.xyz");
 		Some(::std::fs::File::create(&path).unwrap())
 	} else { None };
-	relax_suffix_using_fire(tree, 0, force_file, |md| {
+	let reason = relax_suffix_using_fire(&mut tree, 0, force_file, |md| {
 		if let Some(file) = xyz_debug_file.as_mut() {
 			let mut pos = unflatten(&md.position);
 			let mut lab = labels.clone();
 			write_xyz_(file, pos, lab.clone(), lab.len());
 		}
-	})
+	});
+
+	match reason {
+		Convergence => tree,
+		x => panic!("could not relax hexagon: {:?}", x),
+	}
 }
 
 fn center(pos: &Vec<Trip<Cart>>) -> Trip<Cart> {
