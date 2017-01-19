@@ -71,13 +71,13 @@ fn main() {
 }
 
 fn dla_run() {
+
 	let tree = dla_run_();
 	serde_json::to_writer(&mut File::create("xyz-debug/tree.json").unwrap(), &tree).unwrap();
 }
 
 fn run_relax_on(path: &str) {
 	let tree = serde_json::from_reader(&mut File::open(path).unwrap()).unwrap();
-	println!("{:?}", tree);
 	run_relax_on_(tree)
 }
 
@@ -161,20 +161,12 @@ fn dla_run_() -> Tree {
 
 //			let n_fixed = n_total - n_free;
 
-			let mut xyz_debug_file = cond_file!(XYZ_DEBUG, "xyz-debug/event-{:06}.xyz", dla_step);
-			let force_debug_file = cond_file!(FORCE_DEBUG, "xyz-debug/force-{:06}", dla_step);
-
 			let mut n_relax_steps = 0; // prepare for more abominable hax...
 
-			let labels = tree.labels.clone();
 			//relax_suffix_using_fire(&mut tree, n_fixed, |md| { // relax new
 			//relax_suffix_using_fire(&mut tree, 6, force_debug_file, |md| { // relax all XXX
 			//relax_suffix_using_fire(&mut tree, 0, force_debug_file, |md| { // relax all XXX
-			let reason = relax_using_fire(&mut tree, &free_indices, force_debug_file, |md| { // relax all XXX
-
-				for file in &mut xyz_debug_file {
-					write_xyz_(file, unflatten(&md.position), labels.clone(), labels.len());
-				}
+			let reason = relax_with_files(&mut tree, free_indices, &format!("{:06}", dla_step), |md| { // relax all XXX
 
 				for file in &mut debug_file {
 					writeln!(file, "F {} {} {} {} {}", dla_step, md.nstep, md.alpha, md.timestep, md.cooldown).unwrap();
@@ -208,7 +200,11 @@ fn dla_run_() -> Tree {
 	tree
 }
 
-fn run_relax_on_(tree: Tree) {
+fn run_relax_on_(mut tree: Tree) {
+	let free_indices = (0..tree.len()).filter(|&i| tree.labels[i] != Label::Si).collect_vec();
+	relax_with_files(&mut tree, free_indices.clone(), "reruns", |_| {});
+	relax_with_files(&mut tree, free_indices.clone(), "reruns-2", |_| {});
+	relax_with_files(&mut tree, free_indices, "reruns-3", |_| {});
 }
 
 #[derive(Copy,Clone,Debug,PartialEq)]
@@ -240,15 +236,23 @@ impl Force {
 	fn force(self: Force, x: f64) -> f64 { self.data(x).force }
 }
 
-// Relaxes the last few atoms on the tree (which can safely be worked with without having
-// to unroot other atoms)
-fn relax_suffix_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, n_fixed: usize, ffile: Option<W>, cb: C) -> ::sp2::StopReason {
-	let free_indices = (n_fixed..tree.len()).collect_vec();
-	relax_using_fire(tree, &free_indices, ffile, cb)
+fn relax_with_files<C:FnMut(&Relax), I: IntoIterator<Item=usize>>(tree: &mut Tree, free_indices: I, file_id: &str, mut cb: C) -> ::sp2::StopReason {
+	let dim = tree.dimension;
+	let labels = tree.labels.clone();
+
+	let force_file = cond_file!(FORCE_DEBUG, "xyz-debug/force-{}", file_id);
+	let mut xyz_file = cond_file!(XYZ_DEBUG, "xyz-debug/event-{}.xyz", file_id);
+
+	relax_using_fire(tree, free_indices, force_file, |md| {
+		for file in &mut xyz_file {
+			write_xyz_(file, unflatten(&md.position), labels.clone(), labels.len());
+		}
+		cb(&md);
+	})
 }
 
-fn relax_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, free_indices: &[usize], ffile: Option<W>, mut cb: C) -> ::sp2::StopReason {
-	let info = compute_force_info(free_indices, &tree.parents);
+fn relax_using_fire<C: FnMut(&Relax), I: IntoIterator<Item=usize>, W: Write>(tree: &mut Tree, free_indices: I, ffile: Option<W>, mut cb: C) -> ::sp2::StopReason {
+	let info = compute_force_info(&free_indices.into_iter().collect_vec(), &tree.parents);
 	let dim = tree.dimension;
 
 	let ffile = ::std::cell::RefCell::new(ffile);
@@ -629,18 +633,6 @@ where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Label> {
 
 //---------------------------
 
-// part of a that is parallel to b
-fn par(a: Trip<f64>, b: Trip<f64>) -> Trip<f64> {
-	let b_norm = b.dot(b).sqrt();
-	let b_unit = b.div_s(b_norm);
-	b_unit.mul_s(a.dot(b_unit))
-}
-fn perp(a: Trip<f64>, b: Trip<f64>) -> Trip<f64> {
-	let c = a.sub_v(par(a,b));
-	assert!(c.dot(b).abs() <= 1e-4 * c.dot(c).abs(), "{:?} {:?}", c.dot(c), c.dot(b));
-	c
-}
-
 fn zero_forces(mut md: Relax) -> Relax {
 	md.potential = 0.;
 	md.force.resize(0, 0.);
@@ -907,18 +899,8 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	let _ = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
 
-	let labels = tree.labels.clone();
-	let force_file         = cond_file!(FORCE_DEBUG, "xyz-debug/force-start");
-	let mut xyz_debug_file = cond_file!(XYZ_DEBUG,   "xyz-debug/event-start.xyz");
-
-	let reason = relax_suffix_using_fire(&mut tree, 0, force_file, |md| {
-		for file in &mut xyz_debug_file {
-			let pos = unflatten(&md.position);
-			let lab = labels.clone();
-			write_xyz_(file, pos, lab.clone(), lab.len());
-		}
-	});
-
+	let free_indices = 0..tree.len();
+	let reason = relax_with_files(&mut tree, free_indices, "start", |md| {});
 	match reason {
 		::sp2::StopReason::Convergence => tree,
 		x => panic!("could not relax hexagon: {:?}", x),
