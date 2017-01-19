@@ -55,6 +55,14 @@ const HEX_INITIAL_RADIUS: Cart = 0.5;
 
 const CART_ORIGIN: Trip<Cart> = (0., 0., 0.);
 
+macro_rules! cond_file {
+	($cond:expr, $($fmt_args:tt)+) => {
+		if $cond {
+			Some(File::create(&format!($($fmt_args)+)).unwrap())
+		} else { None }
+	};
+}
+
 fn main() {
 //	test_outputs();
 //	dla_run_test();
@@ -86,7 +94,7 @@ fn dla_run_() -> Tree {
 
 	let final_particles = PER_STEP*NPARTICLE + tree.len();
 
-	let mut debug_file = File::create("debug").unwrap();
+	let mut debug_file = cond_file!(DEBUG, "debug");
 
 	for dla_step in 0..NPARTICLE {
 		write!(stderr(), "Particle {:8} of {:8}: ", dla_step, NPARTICLE).unwrap();
@@ -153,15 +161,8 @@ fn dla_run_() -> Tree {
 
 //			let n_fixed = n_total - n_free;
 
-			let mut xyz_debug_file = if XYZ_DEBUG {
-				let path = format!("xyz-debug/event-{:06}.xyz", dla_step);
-				Some(File::create(&path).unwrap())
-			} else { None };
-
-			let force_debug_file = if FORCE_DEBUG {
-				let path = format!("xyz-debug/force-{:06}", dla_step);
-				Some(File::create(&path).unwrap())
-			} else { None };
+			let mut xyz_debug_file = cond_file!(XYZ_DEBUG, "xyz-debug/event-{:06}.xyz", dla_step);
+			let force_debug_file = cond_file!(FORCE_DEBUG, "xyz-debug/force-{:06}", dla_step);
 
 			let mut n_relax_steps = 0; // prepare for more abominable hax...
 
@@ -175,12 +176,12 @@ fn dla_run_() -> Tree {
 					write_xyz_(file, unflatten(&md.position), labels.clone(), labels.len());
 				}
 
-				if DEBUG {
-					writeln!(debug_file, "F {} {} {} {} {}", dla_step, md.nstep, md.alpha, md.timestep, md.cooldown).unwrap();
+				for file in &mut debug_file {
+					writeln!(file, "F {} {} {} {} {}", dla_step, md.nstep, md.alpha, md.timestep, md.cooldown).unwrap();
 					for i in 0..md.position.len()/3 {
 						let v = (md.velocity[3*i+0], md.velocity[3*i+1], md.velocity[3*i+2]).sqnorm().sqrt();
 						let f = (md.force[3*i+0], md.force[3*i+1], md.force[3*i+2]).sqnorm().sqrt();
-						writeln!(debug_file, "A {} {} {} {:.6} {:.6}", dla_step, md.nstep, i, v, f).unwrap();
+						writeln!(file, "A {} {} {} {:.6} {:.6}", dla_step, md.nstep, i, v, f).unwrap();
 					}
 				}
 
@@ -256,7 +257,7 @@ fn relax_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, free_indices: &[
 		// cb to write forces before fire
 		.relax(|md| {
 			let mut ffile = ffile.borrow_mut();
-			if let Some(file) = ffile.as_mut() {
+			for file in &mut *ffile {
 				writeln!(file, "STEP {}", md.nstep).unwrap();
 			}
 
@@ -269,7 +270,7 @@ fn relax_using_fire<C: FnMut(&Relax), W:Write>(tree: &mut Tree, free_indices: &[
 
 		// cb that is invoked after fire (so that f_dot_v is known)
 		}, |md| {
-			if let Some(file) = ffile.borrow_mut().as_mut() {
+			for file in &mut *ffile.borrow_mut() {
 				writeln!(file, "TOTAL_E {:23.18} F_DOT_V {:23.18} DT {:23.18}", md.potential, md.f_dot_v, md.timestep).unwrap();
 			}
 		})
@@ -655,7 +656,7 @@ fn add_rebo<I:IntoIterator<Item=usize>,W:Write>(mut md: Relax, free_indices: I, 
 	md.potential += potential;
 
 	for i in free_indices {
-		if let Some(file) = ffile.as_mut() {
+		for file in &mut ffile {
 			writeln!(file, "REB:{} F= {} {} {}", i, force[3*i], force[3*i+1], force[3*i+2]).unwrap();
 		}
 
@@ -728,7 +729,7 @@ fn add_corrections<W:Write>(mut md: Relax, info: &ForceTermInfo, dim: Trip<f64>,
 		let ForceOut { force: signed_force, potential } = RADIUS_FORCE.data(dvec.sqnorm().sqrt());
 		let f = normalize(dvec).mul_s(signed_force);
 
-		if let Some(file) = ffile.as_mut() {
+		for file in &mut ffile {
 			writeln!(file, "RAD:{}:{} V= {} F= {} {} {}", i, j, potential, f.0, f.1, f.2).unwrap();
 		}
 
@@ -776,7 +777,7 @@ fn add_corrections<W:Write>(mut md: Relax, info: &ForceTermInfo, dim: Trip<f64>,
 		//   this is also the inverse.)
 		let f = applyV(inv, f);
 
-		if let Some(file) = ffile.as_mut() {
+		for file in &mut ffile {
 			writeln!(file, "ANG:{}:{}:{} V= {} F= {} {} {}", i, j, k, potential, f.0, f.1, f.2).unwrap();
 		}
 
@@ -907,17 +908,11 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
 
 	let labels = tree.labels.clone();
-	let force_file = if FORCE_DEBUG {
-		let path = format!("xyz-debug/force-start");
-		Some(File::create(&path).unwrap())
-	} else { None };
-	let mut xyz_debug_file = if XYZ_DEBUG {
-		let path = format!("xyz-debug/event-start.xyz");
-		Some(File::create(&path).unwrap())
-	} else { None };
+	let force_file         = cond_file!(FORCE_DEBUG, "xyz-debug/force-start");
+	let mut xyz_debug_file = cond_file!(XYZ_DEBUG,   "xyz-debug/event-start.xyz");
 
 	let reason = relax_suffix_using_fire(&mut tree, 0, force_file, |md| {
-		if let Some(file) = xyz_debug_file.as_mut() {
+		for file in &mut xyz_debug_file {
 			let pos = unflatten(&md.position);
 			let lab = labels.clone();
 			write_xyz_(file, pos, lab.clone(), lab.len());
