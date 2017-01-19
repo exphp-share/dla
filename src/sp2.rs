@@ -138,6 +138,11 @@ pub struct Relax {
 	pub alpha:    f64,
 	pub cooldown: u32,
 	pub nstep:    usize,
+	// (FIRE itself doesn't actually use potential, it's just that this was the easiest
+	//  place to put an accumulator for debug output)
+	// (in case you haven't noticed, the theme of this code base is "absolute mayhem")
+	pub debug_potential: f64,
+	pub debug_f_dot_v: f64, // this is also only saved for debug output
 }
 
 impl Relax
@@ -155,12 +160,14 @@ impl Relax
 			cooldown: 0,
 			nstep: 0,
 			params: params,
+			debug_potential: 0.,
+			debug_f_dot_v: 0.,
 		}
 	}
 
 
-	pub fn relax<G>(mut self, mut force_writer: G) -> Vec<f64>
-	where G: FnMut(Self) -> Self
+	pub fn relax<G,H>(mut self, mut force_writer: G, mut post_fire: H) -> Vec<f64>
+	where G: FnMut(Self) -> Self, H: FnMut(&Self)
 	{
 		self.nstep = 0;
 
@@ -176,12 +183,7 @@ impl Relax
 			assert_eq!(self.position.len(), self.velocity.len());
 			assert_eq!(self.velocity.len(), self.force.len());
 
-			//println!("{:?}", &self.force);
-			// MD. (Newton method)
-//			for (p, &v) in izip!(&mut self.position, &self.velocity) { *p = *p + v*self.timestep; }
-//			for (v, &f) in izip!(&mut self.velocity, &self.force)    { *v = *v + f*self.timestep; }
-			{
-				// verlet
+			{ // verlet
 				let dt = self.timestep;
 				for (p, &v, &f) in izip!(&mut self.position, &self.velocity, &self.force) {
 					*p += v * dt + 0.5 * f * dt * dt;
@@ -192,12 +194,11 @@ impl Relax
 				for (v, &f) in izip!(&mut self.velocity, &self.force) { *v += 0.5 * dt * f; }
 			}
 
-//			// force at new position
-//			self = (&mut force_writer)(self);
-
 			if self.should_stop() { break }
 
 			self.step_fire();
+
+			(&mut post_fire)(&self);
 		}
 
 		self.position
@@ -230,6 +231,8 @@ impl Relax
 		for (v,&f) in izip!(&mut self.velocity, &self.force) {
 			*v = (1. - self.alpha) * *v + self.alpha * f * v_norm/f_norm;
 		}
+
+		self.debug_f_dot_v = f_dot_v;
 
 		// don't go uphill
 		if f_dot_v < 0. {

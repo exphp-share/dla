@@ -278,20 +278,32 @@ fn dla_run_test(dee: Dee) -> Tree {
 	tree
 }
 
+#[derive(Copy,Clone,Debug,PartialEq)]
+struct ForceOut { potential: f64, force: f64 }
+
 impl Force {
-	// signed value of force along +x
-	fn force(self: Force, x: f64) -> f64 {
+	fn data(self: Force, x: f64) -> ForceOut {
+		let square = |x| x*x;
 		match self {
 			Quadratic { center, k, } => {
-				2. * k * (center - x)
+				ForceOut {
+					potential: k * square(center - x),
+					force:     2. * k * (center - x),
+				}
 			},
 			Morse { center, k, D } => {
 				let a = (k/(2. * D)).sqrt();
 				let f = (a * (center - x)).exp();
-				2. * a * D * f * (f - 1.)
+				ForceOut {
+					potential: a * D * square(f - 1.),
+					force:     2. * a * D * f * (f - 1.),
+				}
 			},
 		}
 	}
+
+	// signed value of force along +x
+	fn force(self: Force, x: f64) -> f64 { self.data(x).force }
 }
 
 // Relaxes the last few atoms on the tree (which can safely be worked with without having
@@ -303,11 +315,31 @@ fn relax_suffix_using_fire<C: FnMut(&Relax), W:Write>(tree: Tree, n_fixed: usize
 
 fn relax_using_fire<C: FnMut(&Relax), W:Write>(mut tree: Tree, free_indices: &[usize], mut ffile: Option<W>, mut cb: C) -> Tree {
 	let info = compute_force_info(free_indices, &tree.parents);
+	let dim = tree.dimension;
 
+	let ffile = ::std::cell::RefCell::new(ffile);
 	let pos = {
-		let mut relax = sp2::Relax::init(RELAX_PARAMS, flatten(&tree.pos.clone()));
-		let force_fn = |md| morse_writer(md, &mut cb, &info, tree.dimension, ffile.as_mut());
-		relax.relax(force_fn)
+		sp2::Relax::init(RELAX_PARAMS, flatten(&tree.pos.clone()))
+		// cb to write forces before fire
+		.relax(|md| {
+			let mut ffile = ffile.borrow_mut();
+			if let Some(file) = ffile.as_mut() {
+				writeln!(file, "STEP {}", md.nstep);
+			}
+
+			let mut md = zero_forces(md);
+			let mut md = add_rebo(md, info.free_indices.iter().cloned(), dim, ffile.as_mut());
+			let mut md = add_corrections(md, &info, dim, ffile.as_mut());
+			cb(&md);
+
+			md
+
+		// cb that is invoked after fire (so that f_dot_v is known)
+		}, |md| {
+			if let Some(file) = ffile.borrow_mut().as_mut() {
+				writeln!(file, "TOTAL_E {:23.18} F_DOT_V {:23.18} DT {:23.18}", md.debug_potential, md.debug_f_dot_v, md.timestep);
+			}
+		})
 	};
 
 	tree.dangerously_reassign_positions(unflatten(&pos));
@@ -669,20 +701,25 @@ fn perp(a: Trip<f64>, b: Trip<f64>) -> Trip<f64> {
 }
 
 fn zero_forces(mut md: Relax) -> Relax {
+	md.debug_potential = 0.;
 	md.force.resize(0, 0.);
 	md.force.resize(md.position.len(), 0.);
 	md
 }
 
-fn just_write_forces<I:IntoIterator<Item=usize>,W:Write>(mut md: Relax, free_indices: I, dim: Trip<f64>, mut ffile: Option<W>) -> Relax {
+fn add_rebo<I:IntoIterator<Item=usize>,W:Write>(mut md: Relax, free_indices: I, dim: Trip<f64>, mut ffile: Option<W>) -> Relax {
 	let (potential,force) = sp2::calc_potential_flat(md.position.clone(), dim);
 
-	let mut md = zero_forces(md);
+	md.debug_potential += potential;
+
 	for i in free_indices {
 		if let Some(file) = ffile.as_mut() {
-			writeln!(file, "REBO {:5} {} {} {}", i, force[3*i], force[3*i+1], force[3*i+2]);
+			writeln!(file, "REB:{} F= {} {} {}", i, force[3*i], force[3*i+1], force[3*i+2]);
 		}
-		md.force[3*i..3*(i+1)].copy_from_slice(&force[3*i..3*(i+1)]);
+
+		for k in 0..3 {
+			md.force[3*i + k] += force[3*i + k];
+		}
 	}
 	md
 }
@@ -746,12 +783,14 @@ fn add_corrections<W:Write>(mut md: Relax, info: &ForceTermInfo, dim: Trip<f64>,
 		let pj = tup3(&md.position, j);
 		let dvec = nearest_image_sub(pi, pj, dim);
 
-		let f = normalize(dvec).mul_s(RADIUS_FORCE.force(dvec.sqnorm().sqrt()));
+		let ForceOut { force: signed_force, potential } = RADIUS_FORCE.data(dvec.sqnorm().sqrt());
+		let f = normalize(dvec).mul_s(signed_force);
 
 		if let Some(file) = ffile.as_mut() {
-			writeln!(file, "RAD {} {} {} {} {}", i, j, f.0, f.1, f.2);
+			writeln!(file, "RAD:{}:{} V= {} F= {} {} {}", i, j, potential, f.0, f.1, f.2);
 		}
 
+		md.debug_potential += potential;
 		tup3add(&mut md.force, i, f);
 	}
 
@@ -786,19 +825,23 @@ fn add_corrections<W:Write>(mut md: Relax, info: &ForceTermInfo, dim: Trip<f64>,
 		let θ_hat = unit_θ_from_cart(pi);
 
 		// force
-		let f = θ_hat.mul_s(THETA_FORCE.force(θi));
-
-		if let Some(file) = ffile.as_mut() {
-			writeln!(file, "AN_ {}:{}:{} {} {} {}", i, j, k, f.0, f.1, f.2);
-			let f = applyV(inv, f);
-			writeln!(file, "ANG {}:{}:{} {} {} {}", i, j, k, f.0, f.1, f.2);
-		}
+		let ForceOut { force: signed_force, potential } = THETA_FORCE.data(θi);
+		let f = θ_hat.mul_s(signed_force);
 
 		// bring force back into cartesian.
 		// (note: transformation from  grad' V  to  grad V  is more generally the
 		//   transpose matrix of the one that maps x to x'. But for a rotation,
 		//   this is also the inverse.)
 		let f = applyV(inv, f);
+
+		if let Some(file) = ffile.as_mut() {
+			writeln!(file, "ANG:{}:{}:{} V= {} F= {} {} {}", i, j, k, potential, f.0, f.1, f.2);
+		}
+
+		// Note to self:
+		// Yes, it is correct for the potential to always be added once,
+		// regardless of how many of the atoms are fixed.
+		md.debug_potential += potential;
 
 		// ultimately, the two outer atoms (i, k) get pulled in similar directions,
 		// and the middle one (j) receives the opposing forces
@@ -833,17 +876,6 @@ fn cart_from_spherical((r,θ,φ): Trip<f64>) -> Trip<f64> {
 	let (sinθ,cosθ) = (θ.sin(), θ.cos());
 	let (sinφ,cosφ) = (φ.sin(), φ.cos());
 	(r*sinθ*cosφ, r*sinθ*sinφ, r*cosθ)
-}
-
-// code archeologists: can you figure out the evolutionary history behind this copy pasta?
-fn morse_writer<C: FnMut(&Relax), W:Write>(md: Relax, mut cb: C, info: &ForceTermInfo, dim: Trip<f64>, mut ffile: Option<W>) -> Relax {
-	if let Some(file) = ffile.as_mut() {
-		writeln!(file, "STEP {}", md.nstep);
-	}
-	let mut md = just_write_forces(md, info.free_indices.iter().cloned(), dim, ffile.as_mut());
-	let mut md = add_corrections(md, &info, dim, ffile.as_mut());
-	cb(&md);
-	md
 }
 
 fn unflatten<T:Copy>(slice: &[T]) -> Vec<(T,T,T)> {
