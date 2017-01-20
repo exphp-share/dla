@@ -4,7 +4,6 @@
 #![allow(unused_imports)]
 #![allow(non_snake_case)]
 
-// FIXME inconsistent usage of DIMENSION and state.dimension
 const DIMENSION: Trip<Float> = (75., 75., 75.);
 const IS_VACUUM: Trip<bool> = (true, false, true);
 const NPARTICLE: usize = 100;
@@ -13,34 +12,24 @@ const DEBUG: bool = false;
 const XYZ_DEBUG: bool = true;
 const FORCE_DEBUG: bool = true;
 
-#[derive(PartialEq,Copy,Clone,Debug)]
-enum Force {
-	Morse { center: f64, D: f64, k: f64, },
-	Quadratic { center: f64, k: f64, },
-	Zero,
-}
+//const RADIUS_FORCE: Force = Model::Zero;
+//const THETA_FORCE: Force = Model::Zero;
 
-//const RADIUS_FORCE: Force = Force::Morse { center: 1.41, D: 100., k: 0. };
-//const RADIUS_FORCE: Force = Force::Quadratic { center: 1.41, k: 100. };
-
-const RADIUS_FORCE: Force = Force::Morse { center: 1.41, D: 100., k: 100. };
-const THETA_FORCE: Force = Force::Quadratic { center: (120.*PI/180.), k: 100. };
+const RADIUS_FORCE: Model = Model::Morse { center: 1.41, D: 100., k: 100. };
+const THETA_FORCE: Model = Model::Quadratic { center: (120.*PI/180.), k: 100. };
 const USE_REBO: bool = true;
+const DOUBLE_COUNTED_RADIAL_POTENTIAL: bool = false;
 
-//const RADIUS_FORCE: Force = Force::Zero;
-//const THETA_FORCE: Force = Force::Zero;
 
-const RELAX_PARAMS: ::sp2::Params =
-	::sp2::Params {
+const RELAX_PARAMS: ::fire::Params =
+	::fire::Params {
 		timestep_start: 1e-3,
 		timestep_max:   0.05,
-//		timestep_start: 1e-2,
-//		timestep_max:   0.15,
 		force_tolerance: Some(1e-5),
 		step_limit: Some(4000),
 		flail_step_limit: Some(10),
-		turn_condition: ::sp2::TurnCondition::Potential,
-		..::sp2::DEFAULT_PARAMS
+		turn_condition: ::fire::TurnCondition::Potential,
+		..::fire::DEFAULT_PARAMS
 	};
 
 // VM: * Dimer sep should be 1.4 (Angstrom)
@@ -51,9 +40,6 @@ const RELAX_MAX_PARTICLE_COUNT: usize = 12;
 const PARTICLE_RADIUS: Cart = 1.;//Cart(0.4);
 const MOVE_RADIUS: Cart = 1.;
 const DIMER_INITIAL_SEP: Cart = 1.4;
-const HEX_INITIAL_RADIUS: Cart = 0.5;
-
-const CART_ORIGIN: Trip<Cart> = (0., 0., 0.);
 
 macro_rules! cond_file {
 	($cond:expr, $($fmt_args:tt)+) => {
@@ -71,7 +57,6 @@ fn main() {
 }
 
 fn dla_run() {
-
 	let tree = dla_run_();
 	serde_json::to_writer(&mut File::create("xyz-debug/tree.json").unwrap(), &tree).unwrap();
 }
@@ -99,7 +84,7 @@ fn dla_run_() -> Tree {
 	for dla_step in 0..NPARTICLE {
 		write!(stderr(), "Particle {:8} of {:8}: ", dla_step, NPARTICLE).unwrap();
 
-		let mut state = State::from_positions(DIMENSION, tree.pos.clone().into_iter().zip(tree.labels.clone()));
+		let mut state = State::from_positions(tree.dimension, tree.pos.clone().into_iter().zip(tree.labels.clone()));
 
 		let mut pos = random_border_position(&mut rng);
 
@@ -207,39 +192,8 @@ fn run_relax_on_(mut tree: Tree) {
 	relax_with_files(&mut tree, free_indices, "reruns-3", |_| {});
 }
 
-#[derive(Copy,Clone,Debug,PartialEq)]
-struct ForceOut { potential: f64, force: f64 }
-
-impl Force {
-	fn data(self: Force, x: f64) -> ForceOut {
-		let square = |x| x*x;
-		match self {
-			Force::Quadratic { center, k, } => {
-				ForceOut {
-					potential: k * square(center - x),
-					force:     2. * k * (center - x),
-				}
-			},
-			Force::Morse { center, k, D } => {
-				let a = (k/(2. * D)).sqrt();
-				let f = (a * (center - x)).exp();
-				ForceOut {
-					potential: a * D * square(f - 1.),
-					force:     2. * a * D * f * (f - 1.),
-				}
-			},
-			Force::Zero => { ForceOut { potential: 0., force: 0. } },
-		}
-	}
-
-	// signed value of force along +x
-	fn force(self: Force, x: f64) -> f64 { self.data(x).force }
-}
-
-fn relax_with_files<C:FnMut(&Relax), I: IntoIterator<Item=usize>>(tree: &mut Tree, free_indices: I, file_id: &str, mut cb: C) -> ::sp2::StopReason {
-	let dim = tree.dimension;
+fn relax_with_files<C:FnMut(&Fire), I: IntoIterator<Item=usize>>(tree: &mut Tree, free_indices: I, file_id: &str, mut cb: C) -> ::fire::StopReason {
 	let labels = tree.labels.clone();
-
 	let force_file = cond_file!(FORCE_DEBUG, "xyz-debug/force-{}", file_id);
 	let mut xyz_file = cond_file!(XYZ_DEBUG, "xyz-debug/event-{}.xyz", file_id);
 
@@ -251,13 +205,16 @@ fn relax_with_files<C:FnMut(&Relax), I: IntoIterator<Item=usize>>(tree: &mut Tre
 	})
 }
 
-fn relax_using_fire<C: FnMut(&Relax), I: IntoIterator<Item=usize>, W: Write>(tree: &mut Tree, free_indices: I, ffile: Option<W>, mut cb: C) -> ::sp2::StopReason {
-	let info = compute_force_info(&free_indices.into_iter().collect_vec(), &tree.parents);
-	let dim = tree.dimension;
+fn relax_using_fire<C: FnMut(&Fire), I: IntoIterator<Item=usize>, W: Write>(tree: &mut Tree, free_indices: I, ffile: Option<W>, mut cb: C) -> ::fire::StopReason {
+	let free_indices = free_indices.into_iter().collect();
+
+	let rebo_force = ::force::Rebo(USE_REBO);
+	let radial_force = ::force::Radial::prepare(RADIUS_FORCE, &free_indices, &tree.parents);
+	let angular_force = ::force::Angular::prepare(THETA_FORCE, &free_indices, &tree.parents);
 
 	let ffile = ::std::cell::RefCell::new(ffile);
 	let (pos,reason) = {
-		sp2::Relax::init(RELAX_PARAMS, flatten(&tree.pos.clone()))
+		Fire::init(RELAX_PARAMS, flatten(&tree.pos.clone()))
 		// cb to write forces before fire
 		.relax(|md| {
 			let mut ffile = ffile.borrow_mut();
@@ -265,9 +222,10 @@ fn relax_using_fire<C: FnMut(&Relax), I: IntoIterator<Item=usize>, W: Write>(tre
 				writeln!(file, "STEP {}", md.nstep).unwrap();
 			}
 
-			let md = zero_forces(md);
-			let md = add_rebo(md, info.free_indices.iter().cloned(), dim, ffile.as_mut());
-			let md = add_corrections(md, &info, dim, ffile.as_mut());
+			let mut md = zero_forces(md);
+			rebo_force.tally(&mut md, ffile.as_mut(), &free_indices, tree.dimension);
+			radial_force.tally(&mut md, ffile.as_mut(), &free_indices, tree.dimension);
+			angular_force.tally(&mut md, ffile.as_mut(), &free_indices, tree.dimension);
 			cb(&md);
 
 			md
@@ -300,20 +258,21 @@ extern crate serde_json;
 extern crate serde;
 
 
-mod sp2;
-use sp2::Relax;
+pub mod common;
+use common::*;
+
+pub mod force;
+pub mod fire;
+pub mod ffi;
+
+mod timer;
+use timer::Timer;
 
 use rand::Rng;
 use rand::distributions::{IndependentSample,Normal};
 use itertools::Itertools;
 use homogenous::prelude::*;
 use homogenous::numeric::prelude::*;
-use time::precise_time_ns;
-use nalgebra as na;
-use nalgebra::{Rotation, Translation, Transformation, Transform};
-use serde::{Serialize,Deserialize};
-
-use std::collections::HashSet as Set;
 
 use std::ops::Range;
 use std::io::Write;
@@ -322,23 +281,8 @@ use std::fs::File;
 
 use std::f64::consts::PI;
 
-type Float = f64;
-type Pair<T> = (T,T);
-type Trip<T> = (T,T,T);
-
-type NaIso = na::Isometry3<Float>;
-type NaVector3 = na::Vector3<Float>;
-type NaPoint3 = na::Point3<Float>;
-
-fn identity() -> NaIso { NaIso::new(na::zero(), na::zero()) }
-fn translate((x,y,z): Trip<Cart>) -> NaIso { NaIso::new(NaVector3{x:x,y:y,z:z}, na::zero()) }
-fn rotate((x,y,z): Trip<Float>) -> NaIso { NaIso::new(na::zero(), NaVector3{x:x,y:y,z:z}) }
-fn rotate_x(x: Float) -> NaIso { NaIso::new(na::zero(), na_x(x)) }
-fn rotate_y(x: Float) -> NaIso { NaIso::new(na::zero(), na_y(x)) }
-fn rotate_z(x: Float) -> NaIso { NaIso::new(na::zero(), na_z(x)) }
-fn na_x(r: Float) -> NaVector3 { na::Vector3{x:r, ..na::zero()} }
-fn na_y(r: Float) -> NaVector3 { na::Vector3{y:r, ..na::zero()} }
-fn na_z(r: Float) -> NaVector3 { na::Vector3{z:r, ..na::zero()} }
+use force::Model;
+use fire::Fire;
 
 #[derive(Copy,Clone,Eq,PartialEq,Ord,PartialOrd,Hash,Serialize,Deserialize,Debug)]
 enum Label { C, Si }
@@ -362,13 +306,6 @@ struct Tree {
 	dimension: Trip<Float>,
 }
 
-// Get a "look at" isometry; it maps the origin to the eye, and +z towards the target.
-// (The up direction is arbitrarily chosen, without risk of it being invalid)
-fn look_at_pbc(eye: Trip<Cart>, target: Trip<Cart>, dimension: Trip<Float>) -> NaIso {
-	let (_,θ,φ) = spherical_from_cart(nearest_image_sub(target, eye, dimension));
-	translate(eye) * rotate_z(φ) * rotate_y(θ)
-}
-
 impl Tree {
 	fn from_two(dimension: Trip<Float>, length: Cart, labels: (Label,Label)) -> Self {
 		Tree::from_two_pos(dimension, (CART_ORIGIN, (0., length, 0.)), labels)
@@ -384,7 +321,7 @@ impl Tree {
 
 	fn transform_mut(&mut self, iso: NaIso) {
 		for p in &mut self.pos {
-			*p = from_na_point(iso * to_na_point(*p));
+			*p = as_na_point(*p, |p| iso * p);
 		}
 	}
 
@@ -398,7 +335,7 @@ impl Tree {
 		// add an atom in this basis
 		let pos = cart_from_spherical((length, 120f64.to_radians(), beta));
 		// back to cartesian
-		let pos = from_na_point(iso * to_na_point(pos));
+		let pos = as_na_point(pos, |p| iso * p);
 		self.attach_at(parent, label, pos)
 	}
 
@@ -417,53 +354,6 @@ impl Tree {
 		assert_eq!(pos.len(), self.pos.len());
 		self.pos = pos;
 	}
-}
-
-
-//--------------------
-// Make frac coords a newtype which is incompatible with other floats, to help prove that
-// fractional/cartesian conversions are handled properly.
-#[derive(Debug,PartialEq,PartialOrd,Copy,Clone)]
-pub struct Frac(Float);
-pub type Cart = Float;
-trait CartExt { fn frac(self, dimension: Float) -> Frac; }
-impl CartExt for Cart { fn frac(self, dimension: Float) -> Frac { Frac(self/dimension) } }
-
-impl Frac { pub fn cart(self, dimension: Float) -> Cart { self.0*dimension } }
-
-// add common binops to eliminate the majority of reasons I might need to
-// convert back into floats (which would render the type system useless)
-newtype_ops!{ [Frac] arithmetic {:=} {^&}Self {^&}{Self} }
-
-// cart() and frac() methods for triples
-trait ToCart { fn cart(self, dimension: Trip<Float>) -> Trip<Cart>; }
-trait ToFrac { fn frac(self, dimension: Trip<Float>) -> Trip<Frac>; }
-impl ToCart for Trip<Frac> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { zip_with!((self,dimension) |x,d| x.cart(d)) } }
-impl ToFrac for Trip<Cart> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { zip_with!((self,dimension) |x,d| x.frac(d)) } }
-impl ToCart for Trip<Cart> { fn cart(self, _dimension: Trip<Float>) -> Trip<Cart> { self } }
-impl ToFrac for Trip<Frac> { fn frac(self, _dimension: Trip<Float>) -> Trip<Frac> { self } }
-
-// nalgebra interop, but strictly for cartesian
-fn to_na_vector((x,y,z): Trip<Cart>) -> na::Vector3<Float> { na::Vector3 { x: x, y: y, z: z } }
-fn to_na_point((x,y,z): Trip<Cart>)  -> na::Point3<Float>  { na::Point3  { x: x, y: y, z: z } }
-
-fn from_na_vector(na::Vector3 {x,y,z}: na::Vector3<Float>) -> Trip<Cart> { (x,y,z) }
-fn from_na_point(na::Point3 {x,y,z}: na::Point3<Float>) -> Trip<Cart> { (x,y,z) }
-
-fn reduce_pbc(this: Trip<Frac>) -> Trip<Frac> { this.map(|Frac(x)| Frac((x.fract() + 1.0).fract())) }
-fn nearest_image_sub<P:ToFrac,Q:ToFrac>(this: P, that: Q, dimension: Trip<Float>) -> Trip<Cart> {
-	// assumes a diagonal cell
-	let this = this.frac(dimension);
-	let that = that.frac(dimension);
-	let diff = this.sub_v(that)
-		.map(|Frac(x)| Frac(x - x.round())); // range [0.5, -0.5]
-
-	diff.map(|Frac(x)| assert!(-0.5-1e-5 <= x && x <= 0.5+1e-5));
-	diff.cart(dimension)
-}
-
-fn nearest_image_dist_sq<P:ToFrac,Q:ToFrac>(this: P, that: Q, dimension: Trip<Float>) -> Cart {
-	nearest_image_sub(this, that, dimension).sqnorm()
 }
 
 //--------------------
@@ -633,201 +523,12 @@ where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Label> {
 
 //---------------------------
 
-fn zero_forces(mut md: Relax) -> Relax {
+// odd placement...
+fn zero_forces(mut md: Fire) -> Fire {
 	md.potential = 0.;
 	md.force.resize(0, 0.);
 	md.force.resize(md.position.len(), 0.);
 	md
-}
-
-fn add_rebo<I:IntoIterator<Item=usize>,W:Write>(mut md: Relax, free_indices: I, dim: Trip<f64>, mut ffile: Option<W>) -> Relax {
-	if !USE_REBO { return md; }
-
-	let (potential,force) = sp2::calc_potential_flat(md.position.clone(), dim);
-
-	md.potential += potential;
-
-	for i in free_indices {
-		for file in &mut ffile {
-			writeln!(file, "REB:{} F= {} {} {}", i, force[3*i], force[3*i+1], force[3*i+2]).unwrap();
-		}
-
-		for k in 0..3 {
-			md.force[3*i + k] += force[3*i + k];
-		}
-	}
-	md
-}
-
-// precomputed info about what r terms and θ terms exist.
-// contains index pairs/triples which are associated with at least one nonzero
-//  term in the correction forces. (taking into account that fixed atoms have zero force)
-struct ForceTermInfo {
-	free_indices: Set<usize>,
-	radial_pairs: Set<Pair<usize>>,
-	angle_triples: Set<Trip<usize>>,
-}
-
-fn compute_force_info(free_indices: &[usize], parents: &[usize]) -> ForceTermInfo {
-	let free_indices: Set<_> = free_indices.iter().cloned().collect();
-
-	let radial_pairs = {
-		let mut set = Set::new();
-		for i in 0..parents.len() {
-			let j = parents[i];
-			if free_indices.contains(&i) { set.insert((i, j)); }
-			if free_indices.contains(&j) { set.insert((j, i)); }
-		}
-		set
-	};
-
-	let angle_triples = {
-		let mut set = Set::new();
-		for i in 0..parents.len() {
-			let j = parents[i];
-			let k = parents[j];
-			if i != k {
-				if free_indices.contains(&i) || free_indices.contains(&j) { set.insert((i,j,k)); }
-				if free_indices.contains(&k) || free_indices.contains(&j) { set.insert((k,j,i)); }
-			}
-		}
-		set
-	};
-
-	ForceTermInfo {
-		free_indices: free_indices,
-		radial_pairs: radial_pairs,
-		angle_triples: angle_triples,
-	}
-}
-
-fn add_corrections<W:Write>(mut md: Relax, info: &ForceTermInfo, dim: Trip<f64>, mut ffile: Option<W>) -> Relax {
-	let tup3 = |xs: &[f64], i:usize| { (0,1,2).map(|k| xs[3*i+k]) };
-	let tup3set = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| { v.enumerate().map(|(k,x)| xs[3*i+k] = x); };
-	let tup3add = |xs: &mut [f64], i:usize, v:(f64,f64,f64)| {
-		if info.free_indices.contains(&i) {
-			let tmp = tup3(&xs, i);
-			tup3set(xs, i, tmp.add_v(v));
-		}
-	};
-	let apply  = |iso: NaIso, v: (f64,f64,f64)| { from_na_point(iso * to_na_point(v)) };
-	let applyV = |iso: NaIso, v: (f64,f64,f64)| { from_na_vector(iso * to_na_vector(v)) };
-
-	for &(i,j) in &info.radial_pairs {
-		let pi = tup3(&md.position, i);
-		let pj = tup3(&md.position, j);
-		let dvec = nearest_image_sub(pi, pj, dim);
-
-		let ForceOut { force: signed_force, potential } = RADIUS_FORCE.data(dvec.sqnorm().sqrt());
-		let f = normalize(dvec).mul_s(signed_force);
-
-		for file in &mut ffile {
-			writeln!(file, "RAD:{}:{} V= {} F= {} {} {}", i, j, potential, f.0, f.1, f.2).unwrap();
-		}
-
-		md.potential += potential;
-		tup3add(&mut md.force, i, f);
-	}
-
-	for &(i,j,k) in &info.angle_triples {
-		let pi = tup3(&md.position, i);
-		let pj = tup3(&md.position, j);
-		let pk = tup3(&md.position, k);
-
-		let pj = pi.add_v(nearest_image_sub(pj, pi, dim));
-		let pk = pj.add_v(nearest_image_sub(pk, pj, dim));
-
-		// move parent to origin
-		let (pi,pj,pk) = (pi,pj,pk).map(|x| x.sub_v(pj));
-
-		// rotate parent's parent to +z
-		let (_,θk,φk) = spherical_from_cart(pk);
-		let iso = rotate_y(-θk) * rotate_z(-φk);
-		let inv = iso.inverse_transformation();
-		let (pi,pj,pk) = (pi,pj,pk).map(|x| apply(iso, x));
-
-		// are things placed about where we expect?
-		assert!(pj.0.abs() < 1e-5, "{}", pj.0);
-		assert!(pj.1.abs() < 1e-5, "{}", pj.1);
-		assert!(pj.2.abs() < 1e-5, "{}", pj.2);
-		assert!(pk.0.abs() < 1e-5, "{}", pk.0);
-		assert!(pk.1.abs() < 1e-5, "{}", pk.1);
-		assert!(pk.2 > 0.,         "{}", pk.2);
-		assert_eq!(pi, pi);
-
-		// get dat angle
-		let (_,θi,_) = spherical_from_cart(pi);
-		let θ_hat = unit_θ_from_cart(pi);
-
-		// force
-		let ForceOut { force: signed_force, potential } = THETA_FORCE.data(θi);
-		let f = θ_hat.mul_s(signed_force);
-
-		// bring force back into cartesian.
-		// (note: transformation from  grad' V  to  grad V  is more generally the
-		//   transpose matrix of the one that maps x to x'. But for a rotation,
-		//   this is also the inverse.)
-		let f = applyV(inv, f);
-
-		for file in &mut ffile {
-			writeln!(file, "ANG:{}:{}:{} V= {} F= {} {} {}", i, j, k, potential, f.0, f.1, f.2).unwrap();
-		}
-
-		// Note to self:
-		// Yes, it is correct for the potential to always be added once,
-		// regardless of how many of the atoms are fixed.
-		md.potential += potential;
-
-		// ultimately, the two outer atoms (i, k) get pulled in similar directions,
-		// and the middle one (j) receives the opposing forces
-		tup3add(&mut md.force, i, f);
-		tup3add(&mut md.force, j, f.mul_s(-1.));
-	}
-	md
-}
-
-fn spherical_from_cart((x,y,z): Trip<f64>) -> Trip<f64> {
-	let ρ = (x*x + y*y).sqrt();
-	let r = (ρ*ρ + z*z).sqrt();
-	(r, ρ.atan2(z), y.atan2(x))
-}
-
-fn normalize(p: Trip<f64>) -> Trip<f64> {
-	let r = p.sqnorm().sqrt();
-	p.map(|x| x/r)
-}
-
-fn unit_θ_from_cart((x,y,z): Trip<f64>) -> Trip<f64> {
-	// rats, would be safer to compute these from spherical
-	if x == 0. && y == 0. { (z.signum(),0.,0.) }
-	else {
-		let ρ = (x*x + y*y).sqrt();
-		let r = (ρ*ρ + z*z).sqrt();
-		(x*z/ρ/r, y*z/ρ/r, -ρ/r)
-	}
-}
-
-fn cart_from_spherical((r,θ,φ): Trip<f64>) -> Trip<f64> {
-	let (sinθ,cosθ) = (θ.sin(), θ.cos());
-	let (sinφ,cosφ) = (φ.sin(), φ.cos());
-	(r*sinθ*cosφ, r*sinθ*sinφ, r*cosθ)
-}
-
-fn unflatten<T:Copy>(slice: &[T]) -> Vec<(T,T,T)> {
-	let mut iter = slice.iter().cloned();
-	let mut out = vec![];
-	loop {
-		if let Some(x) = iter.next() {
-			let y = iter.next().unwrap();
-			let z = iter.next().unwrap();
-			out.push((x, y, z));
-		} else { break }
-	}
-	out
-}
-
-fn flatten<T:Copy>(slice: &[(T,T,T)]) -> Vec<T> {
-	slice.iter().cloned().flat_map(|x| x.into_iter()).collect()
 }
 
 //---------- DLA
@@ -900,31 +601,10 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
 
 	let free_indices = 0..tree.len();
-	let reason = relax_with_files(&mut tree, free_indices, "start", |md| {});
+	let reason = relax_with_files(&mut tree, free_indices, "start", |_| {});
 	match reason {
-		::sp2::StopReason::Convergence => tree,
+		::fire::StopReason::Convergence => tree,
 		x => panic!("could not relax hexagon: {:?}", x),
-	}
-}
-
-use std::collections::vec_deque::VecDeque;
-struct Timer { deque: VecDeque<u64> }
-impl Timer {
-	pub fn new(n: usize) -> Timer {
-		let mut this = Timer { deque: VecDeque::new() };
-		// Fill solely for ease of implementation (the first few outputs may be inaccurate)
-		while this.deque.len() < n { this.deque.push_back(precise_time_ns()) }
-		this
-	}
-	pub fn push(&mut self) {
-		self.deque.pop_front();
-		self.deque.push_back(precise_time_ns());
-	}
-	pub fn last_ms(&self) -> u64 {
-		(self.deque[self.deque.len()-1] - self.deque[self.deque.len()-2]) / 1_000_000
-	}
-	pub fn average_ms(&self) -> u64 {
-		(self.deque[self.deque.len()-1] - self.deque[0]) / ((self.deque.len() as u64 - 1) * 1_000_000)
 	}
 }
 

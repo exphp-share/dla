@@ -1,107 +1,13 @@
 
 use std::io::{stderr, Write};
 use super::{Trip,Cart,flatten,unflatten};
-use libc::c_int;
-use libc::c_uchar;
 use homogenous::prelude::*;
 use homogenous::numeric::prelude::*;
 
-pub fn calc_potential(pos: Vec<Trip<f64>>, dim: Trip<f64>) -> (f64, Vec<Trip<f64>>) {
-	let (pot, grad) = calc_potential_flat(flatten(&pos), dim);
-	(pot, unflatten(&grad))
-}
-
-pub fn calc_potential_flat(mut pos: Vec<f64>, dim: Trip<f64>) -> (f64, Vec<f64>) {
-	// no NaNs allowed
-	assert!(pos.iter().all(|&p| p == p));
-	assert!(pos.len()%3 == 0);
-
-	let mut lattice = vec![
-		dim.0, 0., 0.,
-		0., dim.1, 0.,
-		0., 0., dim.2,
-	];
-
-	// ffi outputs
-	let mut grad = vec![0.; pos.len()];
-	let mut potential = 0.;
-	let flag = { // scope &mut borrows
-		let c_n = (pos.len() / 3) as c_int;
-		let p_pos = pos.as_mut_ptr() as *mut f64;
-		let p_grad = grad.as_mut_ptr() as *mut f64;
-		let p_potential = (&mut potential) as *mut f64;
-		let p_lattice = lattice.as_mut_ptr();
-		let flag = unsafe {
-			::dla_sys::calc_potential(c_n, p_pos, p_grad, p_potential, p_lattice)
-		};
-		flag
-	};
-
-	match flag {
-		0 => {},
-		1 => {
-			writeln!(&mut stderr(), "POS {:?}", pos).unwrap();
-			panic!("");
-		},
-		_ => panic!("calc_potential: unexpected flag value: {}", flag),
-	}
-
-	(potential, grad.into_iter().map(|x| -x).collect())
-}
-
-pub fn relax_all(pos: Vec<Trip<Cart>>, dim: Trip<f64>) -> Vec<Trip<Cart>> {
-	let n = pos.len();
-	relax(pos, vec![false; n], dim)
-}
-
-pub fn relax(pos: Vec<Trip<Cart>>, fixed: Vec<bool>, dim: Trip<f64>) -> Vec<Trip<Cart>> {
-	// NOTE: this brazenly assumes that [(f64,f64,f64); n] and #[repr(C)] [f64; 3*n]
-	//       have the same representation.
-
-	assert_eq!(fixed.len(), pos.len());
-	let mut lattice = vec![
-		dim.0, 0., 0.,
-		0., dim.1, 0.,
-		0., 0., dim.2,
-	];
-
-	let mut pos = pos;
-	let mut fixed: Vec<_> = fixed.into_iter().map(|f| match f { true => 1, false => 0 } as c_uchar).collect();
-
-	let flag = {
-		let mut potential = 0.;
-		let mut grad = vec![(0.,0.,0.); pos.len()];
-
-		let c_n = pos.len() as c_int;
-		let p_pos = pos.as_mut_ptr() as *mut f64;
-		let p_fixed = fixed.as_mut_ptr() as *mut c_uchar;
-		let p_grad = grad.as_mut_ptr() as *mut f64;
-		let p_potential = (&mut potential) as *mut f64;
-		let p_lattice = lattice.as_mut_ptr();
-		let flag = unsafe {
-			::dla_sys::relax_structure(c_n, p_fixed, p_pos, p_grad, p_potential, p_lattice)
-		};
-		flag
-	};
-
-	match flag {
-		0 => {},
-		1 => {
-			writeln!(&mut stderr(), "POS {:?}", pos).unwrap();
-			panic!("");
-		},
-		_ => panic!("calc_potential: unexpected flag value: {}", flag),
-	}
-
-	pos
-}
-
-
-
 #[derive(Debug,Clone)]
 pub struct Params {
-	// as alpha increases, inertia decreases.
-	// No idea what to call it.  "ertia"?
+	// alpha is a sort of "steering" coefficient; as it increases,
+	// we steer more strongly towards the force
 	pub alpha_max: f64,
 	pub alpha_dec: f64,
 	pub inertia_delay: u32,
@@ -133,11 +39,7 @@ impl Default for Params { fn default() -> Params { DEFAULT_PARAMS } }
 // a type that violates every good practice I can possibly think of.
 // let's open the doors to an era of exposed and mutable state!
 // mayhaps, for once, I'll get something done.
-pub struct Relax {
-	// NOTE: Options are used for things that *could* have been local variables in a loop,
-	//       but have been promoted to member variables for some awful reason
-	//       (e.g. debug). The Option makes it ever so slightly easier to detect
-	//       use before proper initialization.
+pub struct Fire {
 	pub params: Params,
 	pub position: Vec<f64>,
 	pub velocity: Vec<f64>,
@@ -157,27 +59,21 @@ pub struct Relax {
 }
 
 #[derive(Debug,Copy,Clone,Eq,PartialEq,PartialOrd,Ord,Hash)]
-pub enum StopReason {
-	Convergence,
-	Timeout,
-	Flailing,
-}
+pub enum StopReason { Convergence, Timeout, Flailing }
 
 // Standard FIRE has a "turning" condition defined in terms of F dot v,
 // which seems to be at best an approximation of how potential will change.
-// If we do actually compute potential, then we might as well use it.
+// The paper says it is resistant to random errors in potential, though I
+//  somehow rather feel that is in turn susceptible to random errors in _force._
 #[derive(Debug,Copy,Clone,Eq,PartialEq,PartialOrd,Ord,Hash)]
-pub enum TurnCondition {
-	FDotV,
-	Potential,
-}
+pub enum TurnCondition { FDotV, Potential }
 
-impl Relax
+impl Fire
 {
 	pub fn init(params: Params, position: Vec<f64>) -> Self {
 		assert!(!params.timestep_start.is_nan());
 		assert!(!params.timestep_max.is_nan());
-		Relax {
+		Fire {
 			velocity: vec![0.; position.len()],
 			force:    vec![0.; position.len()],
 			position: position.clone(),
@@ -198,7 +94,6 @@ impl Relax
 			prev_potential: ::std::f64::INFINITY,
 		}
 	}
-
 
 	pub fn relax<G,H>(mut self, mut force_writer: G, mut post_fire: H) -> (Vec<f64>, StopReason)
 	where G: FnMut(Self) -> Self, H: FnMut(&Self)
@@ -286,6 +181,7 @@ impl Relax
 		let f_norm = self.force.iter().map(|&x| x*x).sum::<f64>().sqrt();
 		let v_norm = self.velocity.iter().map(|&x| x*x).sum::<f64>().sqrt();
 
+		// steer towards the force
 		for (v,&f) in izip!(&mut self.velocity, &self.force) {
 			*v = (1. - self.alpha) * *v + self.alpha * f * v_norm/f_norm;
 		}
@@ -298,6 +194,7 @@ impl Relax
 			TurnCondition::Potential => self.prev_potential < self.potential,
 		};
 
+		// stop moving immediately and set up heavy steering towards the force
 		if should_turn {
 			self.timestep = self.timestep * self.params.timestep_dec;
 			self.alpha = self.params.alpha_max;
