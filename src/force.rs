@@ -126,7 +126,7 @@ impl Rebo {
 
 		md.potential += potential;
 
-		for i in free_indices {
+		for &i in free_indices {
 			for file in &mut ffile {
 				writeln!(file, "REB:{} F= {} {} {}", i, force[3*i], force[3*i+1], force[3*i+2]).unwrap();
 			}

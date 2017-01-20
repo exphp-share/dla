@@ -81,17 +81,17 @@ fn dla_run_() -> Tree {
 	for dla_step in 0..NPARTICLE {
 		write!(stderr(), "Particle {:8} of {:8}: ", dla_step, NPARTICLE).unwrap();
 
-		let mut state = State::from_positions(tree.dimension, tree.pos.clone().into_iter().zip(tree.labels.clone()));
+		let mut finder = NeighborFinder::from_positions(tree.dimension, tree.pos.clone());
 
 		let mut pos = random_border_position(&mut rng);
 
 		// move until ready to place
-		while state.neighborhood(pos, nbr_radius).is_empty() {
+		while finder.neighborhood(pos, nbr_radius).is_empty() {
 			//writeln!(stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
 			//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
 
 			let disp = random_direction(&mut rng)
-				.mul_s(MOVE_RADIUS).frac(state.dimension);
+				.mul_s(MOVE_RADIUS).frac(tree.dimension);
 
 			pos = reduce_pbc(pos.add_v(disp));
 		}
@@ -100,14 +100,14 @@ fn dla_run_() -> Tree {
 		match PER_STEP {
 			// dimer
 			2 => {
-				let i = state.closest_neighbor(pos, nbr_radius).unwrap();
+				let i = finder.closest_neighbor(pos, nbr_radius).unwrap();
 				let i = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
 				let _ = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
 			},
 
 			// trimer
 			3 => {
-				let i = state.closest_neighbor(pos, nbr_radius).unwrap();
+				let i = finder.closest_neighbor(pos, nbr_radius).unwrap();
 				let i = tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, rng.next_f64()*2.*PI);
 				let r = rng.next_f64()*2.*PI;
 				tree.attach_new(i, Label::C, DIMER_INITIAL_SEP, r);
@@ -122,7 +122,7 @@ fn dla_run_() -> Tree {
 			let first_new_index = tree.len() - PER_STEP;
 			let nbrhood_center = tree.pos[first_new_index];
 
-			state.neighborhood(nbrhood_center.frac(tree.dimension), RELAX_NEIGHBORHOOD_RADIUS)
+			finder.neighborhood(nbrhood_center.frac(tree.dimension), RELAX_NEIGHBORHOOD_RADIUS)
 			.into_iter()
 			.chain(first_new_index..tree.len()) // the new indices are not yet in state
 			.filter(|&i| tree.labels[i] != Label::Si)
@@ -134,8 +134,6 @@ fn dla_run_() -> Tree {
 			.collect_vec()
 		};
 
-		// HACK to get relaxed positions, ignoring the code in state
-		// (tbh neighbor finding and relaxation should be separated out of state)
 		let n_free = free_indices.len();
 //		let mut n_free = PER_STEP;
 		let (n_relax_steps, stop_reason) = {
@@ -258,6 +256,9 @@ pub mod force;
 pub mod fire;
 pub mod ffi;
 
+pub mod brownian;
+use brownian::NeighborFinder;
+
 mod timer;
 use timer::Timer;
 
@@ -346,152 +347,6 @@ impl Tree {
 		// (this method only exists for emphasis; self.pos is actually visible at the callsite)
 		assert_eq!(pos.len(), self.pos.len());
 		self.pos = pos;
-	}
-}
-
-//--------------------
-// fulfills two needs which BTreeMap fails to satisfy:
-//  * support for PartialOrd
-//  * multiple values may have same key
-// and also has a few oddly-placed bits of logic specific to our application.
-type Key = Frac;
-type Value = usize;
-struct SortedIndices {keys: Vec<Key>, values: Vec<Value>}
-impl SortedIndices {
-	fn new() -> Self {
-		// specific to our application:
-		//    Keys at the far reaches of outer space help simplify edge cases.
-		//    The corresponding values should never be used.
-		SortedIndices {
-			keys:   vec![Frac(::std::f64::NEG_INFINITY), Frac(::std::f64::INFINITY)],
-			values: vec![0, ::std::usize::MAX],
-		}
-	}
-
-	// initialize with indices into an enumerable sequence
-	fn rebuild<I:IntoIterator<Item=Key>>(iter: I) -> Self {
-		let mut this = SortedIndices::new();
-		for (v,x) in iter.into_iter().enumerate() {
-			this.insert_images(x, v);
-		}
-		this
-	}
-
-	// specific to our application;
-	//    Images one period above and below are stored to simplify edge cases.
-	fn insert_images(&mut self, k: Key, v: Value) {
-		let k = Frac((k.0 + 1.).fract()); // FIXME HACK
-		assert!(Frac(0.) <= k && k <= Frac(1.), "{:?}", k);
-		self.insert(k, v);
-		self.insert(k - Frac(1.), v);
-		self.insert(k + Frac(1.), v);
-	}
-
-	fn insert(&mut self, k: Key, v: Value) {
-		let i = self.lower_bound(k);
-		self.keys.insert(i, k); self.values.insert(i, v);
-	}
-
-	fn lower_bound(&self, k: Key) -> usize {
-		match self.keys.binary_search_by(|b| b.partial_cmp(&k).unwrap()) {
-			Ok(x) => x, Err(x) => x,
-		}
-	}
-}
-
-fn update_lower_hint(mut hint: usize, sorted: &[Frac], needle: Frac) -> usize {
-	while needle <= sorted[hint] { hint -= 1; }
-	while needle >  sorted[hint] { hint += 1; }
-	hint
-}
-fn update_upper_hint(mut hint: usize, sorted: &[Frac], needle: Frac) -> usize {
-	while needle <  sorted[hint] { hint -= 1; }
-	while needle >= sorted[hint] { hint += 1; }
-	hint
-}
-
-//--------------------------
-// FIXME why does state still have labels
-struct State {
-	labels: Vec<Label>,
-	positions: Vec<Trip<Cart>>,
-	dimension: Trip<Float>,
-	// tracks x +/- move_radius index on each axis
-	hints: Trip<Range<usize>>,
-	// Contains images in the fractional range [-1, 2] along each axis
-	sorted: Trip<SortedIndices>,
-}
-
-impl State {
-	fn new(dimension: Trip<Float>) -> State {
-		State {
-			labels: vec![],
-			positions: vec![],
-			dimension: dimension,
-			hints: ((),(),()).map(|_| 0..0),
-			sorted: ((),(),()).map(|_| SortedIndices::new()),
-		}
-	}
-
-	fn from_positions<P:ToFrac,I:IntoIterator<Item=(P,Label)>>(dimension: Trip<f64>, pos: I) -> State {
-		let mut this = State::new(dimension);
-		for (x, lbl) in pos {
-			this.insert(lbl, reduce_pbc(x.frac(dimension)));
-		}
-		this
-	}
-
-	fn update_cursors(&mut self, frac: Trip<Frac>, radius: Cart) {
-		let radii = self.dimension.map(|d| radius.frac(d));
-
-		zip_with!((frac, radii, self.sorted.as_ref(), self.hints.as_mut())
-		|x,r,set,hints| {
-			hints.start = update_lower_hint(hints.start, &set.keys, x - r);
-			hints.end   = update_upper_hint(hints.end,   &set.keys, x + r);
-		});
-	}
-
-	fn insert(&mut self, label: Label, point: Trip<Frac>) {
-		let point = reduce_pbc(point);
-		let i = self.positions.len();
-		self.positions.push(point.cart(self.dimension));
-		self.labels.push(label);
-
-		zip_with!((point, self.sorted.as_mut()) |x, set| set.insert_images(x, i));
-	}
-
-	fn cursor_neighborhood(&self) -> Vec<usize> {
-		// should we even really bother?
-		if self.hints.clone().any(|x| x.len() == 0) { return vec![]; }
-
-		zip_with!((self.sorted.as_ref(), self.hints.clone())
-			|set, range| { set.values[range].to_vec() }
-		).fold1(|a, b| a.into_iter().filter(|x| b.iter().any(|y| x == y)).collect())
-	}
-
-	fn closest_neighbor(&mut self, point: Trip<Frac>, radius: Cart) -> Option<usize> {
-		let indices = self.neighborhood(point, radius);
-		indices.into_iter()
-			.map(|i| (Some(i), nearest_image_dist_sq(point, self.positions[i], self.dimension)))
-			// locate tuple with minimum distance; unfortunately, Iterator::min_by is unstable.
-			.fold((None,std::f64::MAX), |(i,p),(k,q)| if p < q { (i,p) } else { (k,q) })
-			.0
-	}
-
-	fn neighborhood_from_candidates<I: IntoIterator<Item=usize>>(&self, point: Trip<Frac>, radius: Cart, indices: I) -> Vec<usize> {
-		indices.into_iter().filter(|&i| {
-			nearest_image_dist_sq(point, self.positions[i], self.dimension) <= radius*radius
-		}).collect()
-	}
-
-	fn neighborhood(&mut self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
-		self.update_cursors(point, radius);
-		let candidates = self.cursor_neighborhood();
-		self.neighborhood_from_candidates(point, radius, candidates)
-	}
-
-	fn bruteforce_neighborhood(&self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
-		self.neighborhood_from_candidates(point, radius, 0..self.positions.len())
 	}
 }
 
@@ -597,7 +452,11 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	let reason = relax_with_files(&mut tree, free_indices, "start", |_| {});
 	match reason {
 		::fire::StopReason::Convergence => tree,
-		x => panic!("could not relax hexagon: {:?}", x),
+		::fire::StopReason::Flailing => {
+			writeln!(stderr(), "Warning: Core relaxation ended in flailing!").unwrap();
+			tree
+		},
+		::fire::StopReason::Timeout => panic!("could not relax core"),
 	}
 }
 
