@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# to be used on xyz-debug/force-XXXXXX files
+# to gather info about potential
+
+cat "xyz-debug/force-$2" | grep "$1"
