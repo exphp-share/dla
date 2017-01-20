@@ -9,7 +9,7 @@
 
 const DIMENSION: Trip<Float> = (75., 75., 75.);
 const IS_VACUUM: Trip<bool> = (true, true, false);
-const NPARTICLE: usize = 100;
+const NPARTICLE: usize = 25;
 
 const DEBUG: bool = false; // generates a general debug file
 const XYZ_DEBUG: bool = true; // creates "xyz-debug/event-*.xyz"  files
@@ -41,9 +41,9 @@ const RELAX_PARAMS: ::fire::Params =
 		timestep_max:   0.05,
 		force_tolerance: Some(1e-5),
 //		step_limit: Some(4000),
-		flail_step_limit: Some(50),
+		flail_step_limit: Some(10),
 		turn_condition: ::fire::TurnCondition::Potential,
-		//turn_condition: ::fire::TurnCondition::FDotV,
+//		turn_condition: ::fire::TurnCondition::FDotV,
 		..::fire::DEFAULT_PARAMS
 	};
 
@@ -68,8 +68,8 @@ fn main() {
 //	test_outputs();
 //	dla_run_test();
 //	hexagon_nucleus(DIMENSION);
-//	let tree = dla_run();
-	run_relax_on(&::std::env::args().nth(1).unwrap_or("xyz-debug/tree.json".to_string()));
+	dla_run();
+//	run_relax_on(&::std::env::args().nth(1).unwrap_or("xyz-debug/tree.json".to_string()));
 }
 
 fn dla_run() {
