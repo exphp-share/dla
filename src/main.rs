@@ -1,3 +1,6 @@
+
+// BEWARE OF DOG
+
 #![feature(non_ascii_idents)]
 #![allow(dead_code)]
 #![allow(unused_imports)]
@@ -17,8 +20,9 @@ const FORCE_PARAMS: ::force::Params = ::force::Params {
 	rebo: true,
 };
 
-// Simulates a recent bug... (option exists to help identify its impact)
+// Simulates recent bugs... (these options exist to help identify the bug's impact)
 const DOUBLE_COUNTED_RADIAL_POTENTIAL: bool = false;
+const ERRONEOUS_MORSE_PREFACTOR: bool = false;
 
 
 const RELAX_PARAMS: ::fire::Params =
@@ -26,8 +30,8 @@ const RELAX_PARAMS: ::fire::Params =
 		timestep_start: 1e-3,
 		timestep_max:   0.05,
 		force_tolerance: Some(1e-5),
-		step_limit: Some(4000),
-		flail_step_limit: Some(10),
+//		step_limit: Some(4000),
+		flail_step_limit: Some(20),
 		turn_condition: ::fire::TurnCondition::Potential,
 		..::fire::DEFAULT_PARAMS
 	};
@@ -52,7 +56,8 @@ macro_rules! cond_file {
 fn main() {
 //	test_outputs();
 //	dla_run_test();
-	let tree = dla_run();
+	hexagon_nucleus(DIMENSION);
+//	let tree = dla_run();
 //	run_relax_on(&::std::env::args().nth(1).unwrap_or("xyz-debug/tree.json".to_string()));
 }
 
@@ -146,7 +151,7 @@ fn dla_run_() -> Tree {
 			//relax_suffix_using_fire(&mut tree, n_fixed, |md| { // relax new
 			//relax_suffix_using_fire(&mut tree, 6, force_debug_file, |md| { // relax all XXX
 			//relax_suffix_using_fire(&mut tree, 0, force_debug_file, |md| { // relax all XXX
-			let reason = relax_with_files(&mut tree, free_indices, &format!("{:06}", dla_step), |md| { // relax all XXX
+			let reason = relax_with_files(FORCE_PARAMS, &mut tree, free_indices, &format!("{:06}", dla_step), |md| { // relax all XXX
 
 				for file in &mut debug_file {
 					writeln!(file, "F {} {} {} {} {}", dla_step, md.nstep, md.alpha, md.timestep, md.cooldown).unwrap();
@@ -168,13 +173,13 @@ fn dla_run_() -> Tree {
 			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free, n_relax_steps, stop_reason
 		).unwrap();
 
-		write_xyz(&mut stdout(), &tree, final_particles);
+		write_xyz(&mut stdout(), &tree, Some(final_particles));
 	}
 
 	{
 		let dimension = tree.dimension;
 		let pos = tree.pos.clone().into_iter().map(|x| reduce_pbc(x.frac(dimension)).cart(dimension));
-		write_xyz_(&mut stdout(), pos, tree.labels.clone(), final_particles);
+		write_xyz_(&mut stdout(), pos, tree.labels.clone(), None);
 	}
 	assert_eq!(final_particles, tree.len());
 	tree
@@ -182,28 +187,49 @@ fn dla_run_() -> Tree {
 
 fn run_relax_on_(mut tree: Tree) {
 	let free_indices = (0..tree.len()).filter(|&i| tree.labels[i] != Label::Si).collect_vec();
-	relax_with_files(&mut tree, free_indices.clone(), "reruns", |_| {});
-	relax_with_files(&mut tree, free_indices.clone(), "reruns-2", |_| {});
-	relax_with_files(&mut tree, free_indices, "reruns-3", |_| {});
+
+	let mut params = FORCE_PARAMS;
+
+	let mut file = File::create(&format!("reruns-loop.xyz")).unwrap();
+
+	let ks_asc = (  0..100).map(|i| (100 - i) as f64 / 100f64);
+	let ks_dsc = (100..201).map(|i| (i - 100) as f64 / 100f64);
+	let ks = ks_asc.chain(ks_dsc);
+
+	for (step, k) in ks.enumerate() {
+		params.radial.set_spring_constant(k).expect("kek");
+		params.angular.set_spring_constant(k).expect("kek");
+
+		let mut n_relax_steps = 0;
+		let reason = relax_with_files(params, &mut tree, free_indices.clone(), &format!("reruns-{:03}", step),
+			|md| {n_relax_steps = md.nstep});
+
+		writeln!(stderr(), "Step {:03} ended in {} steps after {:?}", step, n_relax_steps, reason).unwrap();
+		write_xyz(&mut file, &tree, None);
+	}
 }
 
-fn relax_with_files<C:FnMut(&Fire), I: IntoIterator<Item=usize>>(tree: &mut Tree, free_indices: I, file_id: &str, mut cb: C) -> ::fire::StopReason {
+fn relax_with_files<C,I>(params: ::force::Params, tree: &mut Tree, free_indices: I, file_id: &str, mut cb: C) -> ::fire::StopReason
+where C:FnMut(&Fire), I: IntoIterator<Item=usize>,
+{
 	let labels = tree.labels.clone();
 	let force_file = cond_file!(FORCE_DEBUG, "xyz-debug/force-{}", file_id);
 	let mut xyz_file = cond_file!(XYZ_DEBUG, "xyz-debug/event-{}.xyz", file_id);
 
-	relax_using_fire(tree, free_indices, force_file, |md| {
+	relax_using_fire(params, tree, free_indices, force_file, |md| {
 		for file in &mut xyz_file {
-			write_xyz_(file, unflatten(&md.position), labels.clone(), labels.len());
+			write_xyz_(file, unflatten(&md.position), labels.clone(), None);
 		}
 		cb(&md);
 	})
 }
 
-fn relax_using_fire<C: FnMut(&Fire), I: IntoIterator<Item=usize>, W: Write>(tree: &mut Tree, free_indices: I, ffile: Option<W>, mut cb: C) -> ::fire::StopReason {
+fn relax_using_fire<C, I, W>(params: ::force::Params, tree: &mut Tree, free_indices: I, ffile: Option<W>, mut cb: C) -> ::fire::StopReason
+where C:FnMut(&Fire), I: IntoIterator<Item=usize>, W: Write,
+{
 	let free_indices = free_indices.into_iter().collect();
 
-	let force = ::force::Composite::prepare(FORCE_PARAMS, &free_indices, &tree.parents);
+	let force = ::force::Composite::prepare(params, &free_indices, &tree.parents);
 
 	let ffile = ::std::cell::RefCell::new(ffile);
 	let (pos,reason) = {
@@ -350,15 +376,17 @@ impl Tree {
 	}
 }
 
-fn write_xyz<W: Write>(file: W, tree: &Tree, final_length: usize) {
+fn write_xyz<W: Write>(file: W, tree: &Tree, final_length: Option<usize>) {
 	write_xyz_(file, tree.pos.clone(), tree.labels.clone(), final_length);
 }
 
-fn write_xyz_<W: Write, I,J>(mut file: W, pos: I, labels: J, final_length: usize)
+fn write_xyz_<W: Write, I,J>(mut file: W, pos: I, labels: J, final_length: Option<usize>)
 where I: IntoIterator<Item=Trip<Cart>>, J: IntoIterator<Item=Label> {
 	let mut pos = pos.into_iter().collect_vec();
 	let mut labels = labels.into_iter().collect_vec();
 	let first = pos[0];
+
+	let final_length = final_length.unwrap_or(labels.len());
 
 	labels.resize(final_length, Label::C);
 	pos.resize(final_length, first);
@@ -449,7 +477,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
 
 	let free_indices = 0..tree.len();
-	let reason = relax_with_files(&mut tree, free_indices, "start", |_| {});
+	let reason = relax_with_files(FORCE_PARAMS, &mut tree, free_indices, "start", |_| {});
 	match reason {
 		::fire::StopReason::Convergence => tree,
 		::fire::StopReason::Flailing => {
@@ -462,7 +490,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 
 fn test_outputs() {
 	let doit = |tree, path| {
-		write_xyz(File::create(path).unwrap(), &tree, tree.len());
+		write_xyz(File::create(path).unwrap(), &tree, None);
 	};
 
 	doit(barbell_nucleus(DIMENSION), "barbell.xyz");

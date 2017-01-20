@@ -89,12 +89,24 @@ impl Model {
 				let a = (k/(2. * D)).sqrt();
 				let f = (a * (center - x)).exp();
 				ForceOut {
-					potential: a * D * square(f - 1.),
+					potential:
+						if ::ERRONEOUS_MORSE_PREFACTOR { a * D * square(f - 1.) }
+						else { D * square(f - 1.) }
+					,
 					force:     2. * a * D * f * (f - 1.),
 				}
 			},
 			Model::Zero => { ForceOut { potential: 0., force: 0. } },
 		}
+	}
+
+	pub fn set_spring_constant(&mut self, x: f64) -> Result<(),()> {
+		match *self {
+			Model::Quadratic { ref mut k, .. } => *k = x,
+			Model::Morse     { ref mut k, .. } => *k = x,
+			_ => return Err(()),
+		}
+		Ok(())
 	}
 
 	// signed value of force along +x
