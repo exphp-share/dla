@@ -64,25 +64,26 @@ macro_rules! cond_file {
 	};
 }
 
-fn main() {
-//	test_outputs();
-//	dla_run_test();
-//	hexagon_nucleus(DIMENSION);
-	dla_run();
-//	run_relax_on(&::std::env::args().nth(1).unwrap_or("xyz-debug/tree.json".to_string()));
+pub mod mains {
+	use super::*;
+	use ::std::fs::File;
+
+	pub fn dla() {
+		let tree = ::dla_run();
+		::serde_json::to_writer(&mut File::create("xyz-debug/tree.json").unwrap(), &tree).unwrap();
+	}
+
+	pub fn hex_test() { ::hexagon_nucleus(DIMENSION); }
+
+	pub fn gen_test() { ::test_outputs(); }
+
+	pub fn reruns() {
+		let path = ::std::env::args().nth(1).unwrap_or("xyz-debug/tree.json".to_string());
+		::run_reruns_on(&path);
+	}
 }
 
-fn dla_run() {
-	let tree = dla_run_();
-	serde_json::to_writer(&mut File::create("xyz-debug/tree.json").unwrap(), &tree).unwrap();
-}
-
-fn run_relax_on(path: &str) {
-	let tree = serde_json::from_reader(&mut File::open(path).unwrap()).unwrap();
-	run_relax_on_(tree)
-}
-
-fn dla_run_() -> Tree {
+fn dla_run() -> Tree {
 	let PER_STEP = 2;
 
 	let mut tree = hexagon_nucleus(DIMENSION);
@@ -196,7 +197,9 @@ fn dla_run_() -> Tree {
 	tree
 }
 
-fn run_relax_on_(mut tree: Tree) {
+fn run_reruns_on(path: &str) {
+	let mut tree: Tree = serde_json::from_reader(&mut File::open(path).unwrap()).unwrap();
+
 	let free_indices = (0..tree.len()).filter(|&i| tree.labels[i] != Label::Si).collect_vec();
 
 	let mut params = FORCE_PARAMS;
