@@ -1,3 +1,9 @@
 target
 *.xyz
 *.json
+.ipynb_checkpoints
+*.tar
+*.gz
+/out
+/debug
+perf.data*
