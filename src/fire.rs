@@ -151,7 +151,8 @@ impl Fire
 
 		if let Some(tol) = self.params.force_tolerance {
 			has_stop_cond = true;
-			let fsqnorm: f64 = self.force.iter().map(|&x| x*x).sum();
+
+			let fsqnorm: f64 = dot(&self.force, &self.force);
 			assert!(fsqnorm == fsqnorm);
 			if fsqnorm <= tol {
 				return Some(StopReason::Convergence);
@@ -177,9 +178,9 @@ impl Fire
 	}
 
 	fn step_fire(&mut self) {
-		let f_dot_v = izip!(&self.force, &self.velocity).map(|(&x,&y)| x*y).sum::<f64>();
-		let f_norm = self.force.iter().map(|&x| x*x).sum::<f64>().sqrt();
-		let v_norm = self.velocity.iter().map(|&x| x*x).sum::<f64>().sqrt();
+		let f_dot_v = dot(&self.force, &self.velocity);
+		let f_norm = norm(&self.force);
+		let v_norm = norm(&self.velocity);
 
 		// steer towards the force
 		for (v,&f) in izip!(&mut self.velocity, &self.force) {
@@ -219,3 +220,9 @@ impl Fire
 	}
 }
 
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+	assert_eq!(a.len(), b.len());
+	izip!(a,b).map(|(&a,&b)| a*b).sum()
+}
+
+fn norm(a: &[f64]) -> f64 { dot(a,a).sqrt() }

@@ -2,28 +2,37 @@
 // BEWARE OF DOG
 
 #![feature(non_ascii_idents)]
+#![feature(test)]
 #![allow(dead_code)]
 #![allow(unused_imports)]
 #![allow(non_snake_case)]
 
 const DIMENSION: Trip<Float> = (75., 75., 75.);
-const IS_VACUUM: Trip<bool> = (true, false, true);
+const IS_VACUUM: Trip<bool> = (true, true, false);
 const NPARTICLE: usize = 100;
 
 const DEBUG: bool = false; // generates a general debug file
 const XYZ_DEBUG: bool = true; // creates "xyz-debug/event-*.xyz"  files
 const FORCE_DEBUG: bool = true; // creates "xyz-debug/force-*"
 
-const FORCE_PARAMS: ::force::Params = ::force::Params {
+// For easily switching forces on/off
+const FORCE_PARAMS: ::force::Params = FORCE_PARAMS_SRC;
+//const FORCE_PARAMS: ::force::Params = JUST_REBO;
+//const FORCE_PARAMS: ::force::Params = WITHOUT_REBO;
+
+const FORCE_PARAMS_SRC: ::force::Params = ::force::Params {
 	radial: Model::Morse { center: 1.41, D: 100., k: 100. },
 	angular: Model::Quadratic { center: (120.*PI/180.), k: 100. },
 	rebo: true,
 };
 
+const ZERO_FORCE: ::force::Params = ::force::Params { rebo: false, radial: Model::Zero, angular: Model::Zero };
+const WITHOUT_REBO: ::force::Params = ::force::Params { rebo: false, ..FORCE_PARAMS_SRC };
+const JUST_REBO: ::force::Params = ::force::Params { rebo: true, ..ZERO_FORCE };
+
 // Simulates recent bugs... (these options exist to help identify the bug's impact)
 const DOUBLE_COUNTED_RADIAL_POTENTIAL: bool = false;
 const ERRONEOUS_MORSE_PREFACTOR: bool = false;
-
 
 const RELAX_PARAMS: ::fire::Params =
 	::fire::Params {
@@ -31,8 +40,9 @@ const RELAX_PARAMS: ::fire::Params =
 		timestep_max:   0.05,
 		force_tolerance: Some(1e-5),
 //		step_limit: Some(4000),
-		flail_step_limit: Some(20),
+		flail_step_limit: Some(50),
 		turn_condition: ::fire::TurnCondition::Potential,
+		//turn_condition: ::fire::TurnCondition::FDotV,
 		..::fire::DEFAULT_PARAMS
 	};
 
@@ -56,9 +66,9 @@ macro_rules! cond_file {
 fn main() {
 //	test_outputs();
 //	dla_run_test();
-	hexagon_nucleus(DIMENSION);
+//	hexagon_nucleus(DIMENSION);
 //	let tree = dla_run();
-//	run_relax_on(&::std::env::args().nth(1).unwrap_or("xyz-debug/tree.json".to_string()));
+	run_relax_on(&::std::env::args().nth(1).unwrap_or("xyz-debug/tree.json".to_string()));
 }
 
 fn dla_run() {
@@ -262,6 +272,7 @@ where C:FnMut(&Fire), I: IntoIterator<Item=usize>, W: Write,
 
 // what a mess I've made; how did we accumulate so many dependencies? O_o
 extern crate time;
+extern crate test;
 extern crate rand;
 #[macro_use] extern crate homogenous;
 #[macro_use] extern crate itertools;
@@ -285,7 +296,7 @@ pub mod ffi;
 pub mod brownian;
 use brownian::NeighborFinder;
 
-mod timer;
+pub mod timer;
 use timer::Timer;
 
 use rand::Rng;
@@ -342,6 +353,13 @@ impl Tree {
 	fn transform_mut(&mut self, iso: NaIso) {
 		for p in &mut self.pos {
 			*p = as_na_point(*p, |p| iso * p);
+		}
+	}
+
+	fn perturb_mut(&mut self, r: Cart) {
+		let mut rng = rand::weak_rng();
+		for p in &mut self.pos {
+			*p = (*p).add_v(random_direction(&mut rng).mul_s(r));
 		}
 	}
 
@@ -475,6 +493,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	let i = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
 	let _ = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
 	tree.transform_mut(translate(dimension.mul_s(0.5)));
+	tree.perturb_mut(0.1);
 
 	let free_indices = 0..tree.len();
 	let reason = relax_with_files(FORCE_PARAMS, &mut tree, free_indices, "start", |_| {});
