@@ -13,7 +13,59 @@ use ::nalgebra::Transformation;
 
 //------------------------------
 
-#[derive(PartialEq,Copy,Clone,Debug)]
+#[derive(Copy,Clone,Debug,PartialEq)]
+pub struct Params {
+	pub radial: Model,
+	pub angular: Model,
+	pub rebo: bool,
+}
+
+// NOTE: Hey you.
+// Yes, you. The one who wrote this comment earlier. That's right; the one who's me.
+//
+// I know what you're thinking.
+// Don't you dare do it.
+//
+// You do not need a generalized "Sum of forces" type.
+// This is perfectly fine just the way it is.
+#[derive(PartialEq,Clone,Debug)]
+pub struct Composite {
+	radial: Radial,
+	angular: Angular,
+	rebo: Rebo,
+}
+
+impl Composite {
+	pub fn prepare(params: Params, free_indices: &Set<usize>, parents: &[usize]) -> Self {
+		Composite {
+			radial: Radial::prepare(params.radial, free_indices, parents),
+			angular: Angular::prepare(params.angular, free_indices, parents),
+			rebo: Rebo(params.rebo),
+		}
+	}
+
+	// This horrific function (and its ilk) does all of the following:
+	// * Mutate md to add potential and force.
+	// * Return the total potential added. (usually for debug output one level up)
+	// * Writes detailed stats to debug files.
+	// It is _quite decidedly_ not pure.
+	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) -> f64 {
+		let subtotal_rebo    = self.rebo.tally(md, ffile.as_mut(), free_indices, dim);
+		let subtotal_radial  = self.radial.tally(md, ffile.as_mut(), free_indices, dim);
+		let subtotal_angular = self.angular.tally(md, ffile.as_mut(), free_indices, dim);
+
+		for file in &mut ffile {
+			writeln!(file, "SUBTOTAL REBO    V= {:22.18}", subtotal_rebo).unwrap();
+			writeln!(file, "SUBTOTAL RADIAL  V= {:22.18}", subtotal_radial).unwrap();
+			writeln!(file, "SUBTOTAL ANGULAR V= {:22.18}", subtotal_angular).unwrap();
+		}
+		subtotal_rebo + subtotal_radial + subtotal_angular
+	}
+}
+
+//------------------------------
+
+#[derive(Copy,Clone,Debug,PartialEq)]
 pub enum Model {
 	Morse { center: f64, D: f64, k: f64, },
 	Quadratic { center: f64, k: f64, },
@@ -67,8 +119,8 @@ pub struct Angular {
 pub struct Rebo(pub bool);
 
 impl Rebo {
-	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) {
-		if !self.0 { return; }
+	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) -> f64 {
+		if !self.0 { return 0.; }
 
 		let (potential,force) = ::ffi::calc_rebo_flat(md.position.clone(), dim);
 
@@ -83,6 +135,8 @@ impl Rebo {
 				md.force[3*i + k] += force[3*i + k];
 			}
 		}
+
+		potential
 	}
 }
 
@@ -108,7 +162,8 @@ impl Radial {
 		Radial { model: model, terms: terms, }
 	}
 
-	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) {
+	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) -> f64 {
+		let mut subtotal = 0.;
 		for &(i, j) in &self.terms {
 			assert!(i < j, "uniqueness condition");
 
@@ -126,16 +181,18 @@ impl Radial {
 			// Note to self:
 			// Yes, it is correct for the potential to always be added once,
 			// regardless of how many of the atoms are fixed.
-			md.potential += potential;
+			subtotal += potential;
 			// NOTE: this simulates the behavior of the code prior to the recent refactor
 			// FIXME: remove once no longer of interest
 			if ::DOUBLE_COUNTED_RADIAL_POTENTIAL && free_indices.contains(&i) && free_indices.contains(&j) {
-				md.potential += potential;
+				subtotal += potential;
 			}
 
 			if free_indices.contains(&i) { tup3add(&mut md.force, i, f) }
 			if free_indices.contains(&j) { tup3add(&mut md.force, j, f.mul_s(-1.)) }
 		}
+		md.potential += subtotal;
+		subtotal
 	}
 }
 
@@ -162,7 +219,8 @@ impl Angular {
 		Angular { model: model, terms: terms, }
 	}
 
-	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) {
+	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) -> f64 {
+		let mut subtotal = 0.;
 		for &(i,j,k) in &self.terms {
 			let pi = tup3(&md.position, i);
 			let pj = tup3(&md.position, j);
@@ -210,14 +268,15 @@ impl Angular {
 			// Note to self:
 			// Yes, it is correct for the potential to always be added once,
 			// regardless of how many of the atoms are fixed.
-			md.potential += potential;
-			if free_indices.contains(&i) && free_indices.contains(&j) { md.potential += potential }
+			subtotal += potential;
 
 			// ultimately, the two outer atoms (i, k) get pulled in similar directions,
 			// and the middle one (j) receives the opposing forces
 			if free_indices.contains(&i) { tup3add(&mut md.force, i, f); }
 			if free_indices.contains(&j) { tup3add(&mut md.force, j, f.mul_s(-1.)) };
 		}
+		md.potential += subtotal;
+		subtotal
 	}
 }
 

@@ -1,4 +1,3 @@
-
 #![feature(non_ascii_idents)]
 #![allow(dead_code)]
 #![allow(unused_imports)]
@@ -8,16 +7,17 @@ const DIMENSION: Trip<Float> = (75., 75., 75.);
 const IS_VACUUM: Trip<bool> = (true, false, true);
 const NPARTICLE: usize = 100;
 
-const DEBUG: bool = false;
-const XYZ_DEBUG: bool = true;
-const FORCE_DEBUG: bool = true;
+const DEBUG: bool = false; // generates a general debug file
+const XYZ_DEBUG: bool = true; // creates "xyz-debug/event-*.xyz"  files
+const FORCE_DEBUG: bool = true; // creates "xyz-debug/force-*"
 
-//const RADIUS_FORCE: Force = Model::Zero;
-//const THETA_FORCE: Force = Model::Zero;
+const FORCE_PARAMS: ::force::Params = ::force::Params {
+	radial: Model::Morse { center: 1.41, D: 100., k: 100. },
+	angular: Model::Quadratic { center: (120.*PI/180.), k: 100. },
+	rebo: true,
+};
 
-const RADIUS_FORCE: Model = Model::Morse { center: 1.41, D: 100., k: 100. };
-const THETA_FORCE: Model = Model::Quadratic { center: (120.*PI/180.), k: 100. };
-const USE_REBO: bool = true;
+// Simulates a recent bug... (option exists to help identify its impact)
 const DOUBLE_COUNTED_RADIAL_POTENTIAL: bool = false;
 
 
@@ -35,9 +35,9 @@ const RELAX_PARAMS: ::fire::Params =
 // VM: * Dimer sep should be 1.4 (Angstrom)
 //     * Interaction radius (to begin relaxation) should be 2
 
+const BROWNIAN_STOP_RADIUS: Cart = 2.;
 const RELAX_NEIGHBORHOOD_RADIUS: Cart = 5.;
 const RELAX_MAX_PARTICLE_COUNT: usize = 12;
-const PARTICLE_RADIUS: Cart = 1.;//Cart(0.4);
 const MOVE_RADIUS: Cart = 1.;
 const DIMER_INITIAL_SEP: Cart = 1.4;
 
@@ -52,8 +52,8 @@ macro_rules! cond_file {
 fn main() {
 //	test_outputs();
 //	dla_run_test();
-//	let tree = dla_run();
-	run_relax_on(&::std::env::args().nth(1).unwrap_or("xyz-debug/tree.json".to_string()));
+	let tree = dla_run();
+//	run_relax_on(&::std::env::args().nth(1).unwrap_or("xyz-debug/tree.json".to_string()));
 }
 
 fn dla_run() {
@@ -72,14 +72,11 @@ fn dla_run_() -> Tree {
 	let mut tree = hexagon_nucleus(DIMENSION);
 
 	let mut rng = rand::weak_rng();
-
-	let nbr_radius = MOVE_RADIUS + PARTICLE_RADIUS;
-
 	let mut timer = Timer::new(30);
-
-	let final_particles = PER_STEP*NPARTICLE + tree.len();
-
 	let mut debug_file = cond_file!(DEBUG, "debug");
+
+	let nbr_radius = BROWNIAN_STOP_RADIUS;
+	let final_particles = PER_STEP*NPARTICLE + tree.len();
 
 	for dla_step in 0..NPARTICLE {
 		write!(stderr(), "Particle {:8} of {:8}: ", dla_step, NPARTICLE).unwrap();
@@ -208,9 +205,7 @@ fn relax_with_files<C:FnMut(&Fire), I: IntoIterator<Item=usize>>(tree: &mut Tree
 fn relax_using_fire<C: FnMut(&Fire), I: IntoIterator<Item=usize>, W: Write>(tree: &mut Tree, free_indices: I, ffile: Option<W>, mut cb: C) -> ::fire::StopReason {
 	let free_indices = free_indices.into_iter().collect();
 
-	let rebo_force = ::force::Rebo(USE_REBO);
-	let radial_force = ::force::Radial::prepare(RADIUS_FORCE, &free_indices, &tree.parents);
-	let angular_force = ::force::Angular::prepare(THETA_FORCE, &free_indices, &tree.parents);
+	let force = ::force::Composite::prepare(FORCE_PARAMS, &free_indices, &tree.parents);
 
 	let ffile = ::std::cell::RefCell::new(ffile);
 	let (pos,reason) = {
@@ -223,9 +218,7 @@ fn relax_using_fire<C: FnMut(&Fire), I: IntoIterator<Item=usize>, W: Write>(tree
 			}
 
 			let mut md = zero_forces(md);
-			rebo_force.tally(&mut md, ffile.as_mut(), &free_indices, tree.dimension);
-			radial_force.tally(&mut md, ffile.as_mut(), &free_indices, tree.dimension);
-			angular_force.tally(&mut md, ffile.as_mut(), &free_indices, tree.dimension);
+			force.tally(&mut md, ffile.as_mut(), &free_indices, tree.dimension);
 			cb(&md);
 
 			md
