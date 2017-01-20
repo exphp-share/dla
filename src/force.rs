@@ -5,11 +5,13 @@ use fire::Fire;
 
 use ::std::io::Write;
 use ::std::collections::HashSet as Set;
+use ::std::cmp::Ordering;
 
 use ::homogenous::prelude::*;
 use ::homogenous::numeric::prelude::*;
 
 use ::nalgebra::Transformation;
+use ::nalgebra::ApproxEq;
 
 //------------------------------
 
@@ -215,16 +217,17 @@ impl Angular {
 			for i in 0..parents.len() {
 				let j = parents[i];
 				let k = parents[j];
-				if i != k {
-					set.insert((i,j,k));
-					set.insert((k,j,i));
+				match i.cmp(&k) {
+					Ordering::Less    => { set.insert((i,j,k)); },
+					Ordering::Greater => { set.insert((k,j,i)); },
+					Ordering::Equal   => { }, // self-angle, probably at the root of the "tree"
 				}
 			}
 
-			// Each term potentially affects any of the first two indices (but not the third).
+			// Each term potentially affects any of the three indices (but not the third).
 			// Drop those that can't do anything.
 			set.into_iter()
-				.filter(|&(i,j,_)| free_indices.contains(&i) || free_indices.contains(&j))
+				.filter(|&ijk| ijk.any(|i| free_indices.contains(&i)))
 				.collect()
 		};
 
@@ -233,59 +236,77 @@ impl Angular {
 
 	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) -> f64 {
 		let mut subtotal = 0.;
+
 		for &(i,j,k) in &self.terms {
-			let pi = tup3(&md.position, i);
-			let pj = tup3(&md.position, j);
-			let pk = tup3(&md.position, k);
+			assert!(i < k, "uniqueness condition");
 
-			let pj = pi.add_v(nearest_image_sub(pj, pi, dim));
-			let pk = pj.add_v(nearest_image_sub(pk, pj, dim));
+			// This is a bit painful;
+			// We want to add the potential precisely once, but the forces are more easily
+			//  computed by considering each of the endpoint atoms.
+			//
+			// This closure will:
+			//   * write the forces
+			//   * RETURN the potentials (for further inspection)
+			let potentials = ((i,j,k), (k,j,i)).map(|(i,j,k)| {
 
-			// move parent to origin
-			let (pi,pj,pk) = (pi,pj,pk).map(|x| x.sub_v(pj));
+				let pi = tup3(&md.position, i);
+				let pj = tup3(&md.position, j);
+				let pk = tup3(&md.position, k);
 
-			// rotate parent's parent to +z
-			let (_,θk,φk) = spherical_from_cart(pk);
-			let iso = rotate_y(-θk) * rotate_z(-φk);
-			let inv = iso.inverse_transformation();
-			let (pi,pj,pk) = (pi,pj,pk).map(|x| applyP(iso, x));
+				let pj = pi.add_v(nearest_image_sub(pj, pi, dim));
+				let pk = pj.add_v(nearest_image_sub(pk, pj, dim));
 
-			// are things placed about where we expect?
-			assert!(pj.0.abs() < 1e-5, "{}", pj.0);
-			assert!(pj.1.abs() < 1e-5, "{}", pj.1);
-			assert!(pj.2.abs() < 1e-5, "{}", pj.2);
-			assert!(pk.0.abs() < 1e-5, "{}", pk.0);
-			assert!(pk.1.abs() < 1e-5, "{}", pk.1);
-			assert!(pk.2 > 0.,         "{}", pk.2);
-			assert_eq!(pi, pi);
+				// move parent to origin
+				let (pi,pj,pk) = (pi,pj,pk).map(|x| x.sub_v(pj));
 
-			// get dat angle
-			let (_,θi,_) = spherical_from_cart(pi);
-			let θ_hat = unit_θ_from_cart(pi);
+				// rotate parent's parent to +z
+				let (_,θk,φk) = spherical_from_cart(pk);
+				let iso = rotate_y(-θk) * rotate_z(-φk);
+				let inv = iso.inverse_transformation();
+				let (pi,pj,pk) = (pi,pj,pk).map(|x| applyP(iso, x));
 
-			// force
-			let ForceOut { force: signed_force, potential } = self.model.data(θi);
-			let f = θ_hat.mul_s(signed_force);
+				// are things placed about where we expect?
+				assert!(pj.all(|x| x.abs() < 1e-5), "{:?}", pj);
+				assert!(pk.0.abs() < 1e-5, "{}", pk.0);
+				assert!(pk.1.abs() < 1e-5, "{}", pk.1);
+				assert!(pk.2 > 0.,         "{}", pk.2);
+				assert_eq!(pi, pi);
 
-			// bring force back into cartesian.
-			// (note: transformation from  grad' V  to  grad V  is more generally the
-			//   transpose matrix of the one that maps x to x'. But for a rotation,
-			//   this is also the inverse.)
-			let f = applyV(inv, f);
+				// get dat angle
+				let (_,θi,_) = spherical_from_cart(pi);
+				let θ_hat = unit_θ_from_cart(pi);
 
-			for file in &mut ffile {
-				writeln!(file, "ANG:{}:{}:{} V= {} F= {} {} {}", i, j, k, potential, f.0, f.1, f.2).unwrap();
+				// force
+				let ForceOut { force: signed_force, potential } = self.model.data(θi);
+				let f = θ_hat.mul_s(signed_force);
+
+				// bring force back into cartesian.
+				// (note: transformation from  grad' V  to  grad V  is more generally the
+				//   transpose matrix of the one that maps x to x'. But for a rotation,
+				//   this is also the inverse.)
+				let f = applyV(inv, f);
+
+				for file in &mut ffile {
+					writeln!(file, "ANG:{}:{}:{} V= {} F= {} {} {}", i, j, k, potential, f.0, f.1, f.2).unwrap();
+				}
+
+				// ultimately, the two outer atoms (i, k) get pulled in similar (but not parallel)
+				// directions and the middle one (j) receives the opposing forces
+				if free_indices.contains(&i) { tup3add(&mut md.force, i, f); }
+				if free_indices.contains(&j) { tup3add(&mut md.force, j, f.mul_s(-1.)) };
+				potential
+			});
+
+			// Both directions should have witnessed the same potential...
+			assert!(potentials.0.approx_eq(&potentials.1), "{:?}", potentials);
+			// ...but we only want to add it once.
+			subtotal += potentials.0;
+
+			if ::DOUBLE_COUNTED_ANGULAR_POTENTIAL {
+				if free_indices.contains(&j) || (free_indices.contains(&i) && free_indices.contains(&k)) {
+					subtotal += potentials.0;
+				}
 			}
-
-			// Note to self:
-			// Yes, it is correct for the potential to always be added once,
-			// regardless of how many of the atoms are fixed.
-			subtotal += potential;
-
-			// ultimately, the two outer atoms (i, k) get pulled in similar directions,
-			// and the middle one (j) receives the opposing forces
-			if free_indices.contains(&i) { tup3add(&mut md.force, i, f); }
-			if free_indices.contains(&j) { tup3add(&mut md.force, j, f.mul_s(-1.)) };
 		}
 		md.potential += subtotal;
 		subtotal

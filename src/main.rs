@@ -32,6 +32,7 @@ const JUST_REBO: ::force::Params = ::force::Params { rebo: true, ..ZERO_FORCE };
 
 // Simulates recent bugs... (these options exist to help identify the bug's impact)
 const DOUBLE_COUNTED_RADIAL_POTENTIAL: bool = false;
+const DOUBLE_COUNTED_ANGULAR_POTENTIAL: bool = false;
 const ERRONEOUS_MORSE_PREFACTOR: bool = false;
 
 const RELAX_PARAMS: ::fire::Params =
