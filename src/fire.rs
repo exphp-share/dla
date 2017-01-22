@@ -1,5 +1,4 @@
 
-use std::io::{stderr, Write};
 use super::{Trip,Cart,flatten,unflatten};
 use homogenous::prelude::*;
 use homogenous::numeric::prelude::*;

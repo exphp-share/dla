@@ -7,13 +7,17 @@
 #![allow(unused_imports)]
 #![allow(non_snake_case)]
 
-const DIMENSION: Trip<Float> = (75., 75., 75.);
-const IS_VACUUM: Trip<bool> = (true, true, false);
-const NPARTICLE: usize = 25;
+#[macro_use]
+pub mod common;
+use common::*;
+
+const DIMENSION: Trip<Float> = (100., 100., 100.);
+const IS_VACUUM: Trip<bool> = (true, true, true);
+const NPARTICLE: usize = 200;
 
 const DEBUG: bool = false; // generates a general debug file
-const XYZ_DEBUG: bool = true; // creates "xyz-debug/event-*.xyz"  files
-const FORCE_DEBUG: bool = true; // creates "xyz-debug/force-*"
+const XYZ_DEBUG: bool = false; // creates "xyz-debug/event-*.xyz"  files
+const FORCE_DEBUG: bool = false; // creates "xyz-debug/force-*"
 
 // For easily switching forces on/off
 const FORCE_PARAMS: ::force::Params = FORCE_PARAMS_SRC;
@@ -21,8 +25,8 @@ const FORCE_PARAMS: ::force::Params = FORCE_PARAMS_SRC;
 //const FORCE_PARAMS: ::force::Params = WITHOUT_REBO;
 
 const FORCE_PARAMS_SRC: ::force::Params = ::force::Params {
-	radial: Model::Morse { center: 1.41, D: 100., k: 100. },
-	angular: Model::Quadratic { center: (120.*PI/180.), k: 100. },
+	radial: Model::Morse { center: 1.41, D: 100., k: 40. },
+	angular: Model::Quadratic { center: (120.*PI/180.), k: 40. },
 	rebo: true,
 };
 
@@ -96,7 +100,7 @@ fn dla_run() -> Tree {
 	let final_particles = PER_STEP*NPARTICLE + tree.len();
 
 	for dla_step in 0..NPARTICLE {
-		write!(stderr(), "Particle {:8} of {:8}: ", dla_step, NPARTICLE).unwrap();
+		errln!("Particle {:8} of {:8}: ", dla_step, NPARTICLE);
 
 		let mut finder = NeighborFinder::from_positions(tree.dimension, tree.pos.clone());
 
@@ -104,8 +108,8 @@ fn dla_run() -> Tree {
 
 		// move until ready to place
 		while finder.neighborhood(pos, nbr_radius).is_empty() {
-			//writeln!(stderr(), "({:4},{:4},{:4})  ({:8?} ms)",
-			//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000).unwrap();
+			//errln!("({:4},{:4},{:4})  ({:8?} ms)",
+			//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000);
 
 			let disp = random_direction(&mut rng)
 				.mul_s(MOVE_RADIUS).frac(tree.dimension);
@@ -181,9 +185,9 @@ fn dla_run() -> Tree {
 
 		// debugging info
 		timer.push();
-		writeln!(stderr(), "({:8.6}, {:8.6}, {:8.6})  ({:5?} ms, avg: {:5?})  (relaxed {:3} in {:6} after {:?})",
+		errln!("({:8.6}, {:8.6}, {:8.6})  ({:5?} ms, avg: {:5?})  (relaxed {:3} in {:6} after {:?})",
 			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free, n_relax_steps, stop_reason
-		).unwrap();
+		);
 
 		write_xyz(&mut stdout(), &tree, Some(final_particles));
 	}
@@ -194,21 +198,55 @@ fn dla_run() -> Tree {
 		write_xyz_(&mut stdout(), pos, tree.labels.clone(), None);
 	}
 	assert_eq!(final_particles, tree.len());
+
+	// copy pasta alert
+	{
+		err!("Relaxing full structure...");
+
+		let carbons = tree.carbons();
+		let mut n_steps = 0;
+		let reason = relax_with_files(FORCE_PARAMS, &mut tree, carbons, "end-a", |md| {
+			// FIXME bah if I'm going to keep doing this sort of hack to get number of steps
+			//   then it ought to just be an output.
+			n_steps = md.nstep;
+		});
+		write_xyz(&mut stdout(), &tree, None);
+		errln!(" done in {} steps after {:?}...", n_steps, reason);
+	}
+
+	{
+		err!("Relaxing with REBO...");
+
+		let carbons = tree.carbons();
+		let mut n_steps = 0;
+		let reason = relax_with_files(JUST_REBO, &mut tree, carbons, "end-b", |md| {
+			n_steps = md.nstep;
+		});
+		write_xyz(&mut stdout(), &tree, None);
+		errln!(" done in {} steps after {:?}...", n_steps, reason);
+	}
+	
 	tree
 }
 
 fn run_reruns_on(path: &str) {
 	let mut tree: Tree = serde_json::from_reader(&mut File::open(path).unwrap()).unwrap();
 
-	let free_indices = (0..tree.len()).filter(|&i| tree.labels[i] != Label::Si).collect_vec();
+	let free_indices = tree.carbons();
 
 	let mut params = FORCE_PARAMS;
 
 	let mut file = File::create(&format!("reruns-loop.xyz")).unwrap();
 
-	let ks_asc = (  0..100).map(|i| (100 - i) as f64 / 100f64);
-	let ks_dsc = (100..201).map(|i| (i - 100) as f64 / 100f64);
-	let ks = ks_asc.chain(ks_dsc);
+	let semi_inclusive_linspace = |n,a,b| (0..n).map(move |i| a + (b-a) * i as f64/n as f64);
+
+	let n_frames_one_dir = 5;
+	let min_k = 0.;
+	let max_k = 100.;
+
+//	let ks_dsc = semi_inclusive_linspace(n_frames_one_dir, max_k, min_k);
+//	let ks_asc = semi_inclusive_linspace(n_frames_one_dir, min_k, max_k);
+	let mut ks = ::std::iter::once(100.).chain(semi_inclusive_linspace(5, 25., 0.)).chain(vec![0.]);
 
 	for (step, k) in ks.enumerate() {
 		params.radial.set_spring_constant(k).expect("kek");
@@ -218,7 +256,7 @@ fn run_reruns_on(path: &str) {
 		let reason = relax_with_files(params, &mut tree, free_indices.clone(), &format!("reruns-{:03}", step),
 			|md| {n_relax_steps = md.nstep});
 
-		writeln!(stderr(), "Step {:03} ended in {} steps after {:?}", step, n_relax_steps, reason).unwrap();
+		errln!("Step {:03} ended in {} steps after {:?}", step, n_relax_steps, reason);
 		write_xyz(&mut file, &tree, None);
 	}
 }
@@ -290,8 +328,6 @@ extern crate serde_json;
 extern crate serde;
 
 
-pub mod common;
-use common::*;
 
 pub mod force;
 pub mod fire;
@@ -311,7 +347,7 @@ use homogenous::numeric::prelude::*;
 
 use std::ops::Range;
 use std::io::Write;
-use std::io::{stderr,stdout};
+use std::io::stdout;
 use std::fs::File;
 
 use std::f64::consts::PI;
@@ -395,6 +431,10 @@ impl Tree {
 		// (this method only exists for emphasis; self.pos is actually visible at the callsite)
 		assert_eq!(pos.len(), self.pos.len());
 		self.pos = pos;
+	}
+
+	fn carbons(&self) -> Vec<usize> {
+		(0..self.len()).filter(|&i| self.labels[i] == Label::C).collect()
 	}
 }
 
@@ -504,7 +544,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	match reason {
 		::fire::StopReason::Convergence => tree,
 		::fire::StopReason::Flailing => {
-			writeln!(stderr(), "Warning: Core relaxation ended in flailing!").unwrap();
+			errln!("Warning: Core relaxation ended in flailing!");
 			tree
 		},
 		::fire::StopReason::Timeout => panic!("could not relax core"),

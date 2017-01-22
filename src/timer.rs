@@ -45,6 +45,6 @@ pub fn time_ret<A, F:FnOnce() -> A>(func: F) -> (u64, A) {
 #[inline(never)]
 pub fn time_log<A, F:FnOnce() -> A>(msg: &str, func: F) -> A {
 	let (t,a) = time_ret(func);
-	writeln!(::std::io::stderr(), "time_log: {}: {}", msg, t).unwrap();
+	errln!("time_log: {}: {}", msg, t);
 	a
 }

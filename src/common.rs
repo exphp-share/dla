@@ -4,6 +4,18 @@ use nalgebra as na;
 use ::homogenous::prelude::*;
 use ::homogenous::numeric::prelude::*;
 
+macro_rules! err {
+	($($args:tt)*) => {{
+		use ::std::io::Write;
+		write!(::std::io::stderr(), $($args)*).unwrap();
+	}};
+}
+
+macro_rules! errln {
+	($fmt:expr) => (err!(concat!($fmt, "\n")));
+	($fmt:expr, $($arg:tt)*) => (err!(concat!($fmt, "\n"), $($arg)*));
+}
+
 pub const CART_ORIGIN: Trip<Cart> = (0., 0., 0.);
 
 pub type Float = f64;
