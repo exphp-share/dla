@@ -17,11 +17,7 @@ pub fn calc_rebo_flat(mut pos: Vec<f64>, dim: Trip<f64>) -> (f64, Vec<f64>) {
 	assert!(pos.iter().all(|&p| p == p));
 	assert!(pos.len()%3 == 0);
 
-	let mut lattice = vec![
-		dim.0, 0., 0.,
-		0., dim.1, 0.,
-		0., 0., dim.2,
-	];
+	let mut lattice = lattice_matrix(dim);
 
 	// ffi outputs
 	let mut grad = vec![0.; pos.len()];
@@ -42,11 +38,7 @@ pub unsafe fn persistent_init(mut pos: Vec<f64>, dim: Trip<f64>) {
 	assert!(pos.iter().all(|&p| p == p));
 	assert!(pos.len()%3 == 0);
 
-	let mut lattice = vec![
-		dim.0, 0., 0.,
-		0., dim.1, 0.,
-		0., 0., dim.2,
-	];
+	let mut lattice = lattice_matrix(dim);
 
 	validate_flag("persistent_init", { // scope &mut borrows
 		let c_n = (pos.len() / 3) as c_int;
@@ -83,11 +75,7 @@ pub fn rebo_relax(pos: Vec<Trip<Cart>>, fixed: Vec<bool>, dim: Trip<f64>) -> Vec
 	//       have the same representation.
 
 	assert_eq!(fixed.len(), pos.len());
-	let mut lattice = vec![
-		dim.0, 0., 0.,
-		0., dim.1, 0.,
-		0., 0., dim.2,
-	];
+	let mut lattice = lattice_matrix(dim);
 
 	let mut pos = pos;
 	let mut fixed: Vec<_> = fixed.into_iter().map(|f| match f { true => 1, false => 0 } as c_uchar).collect();
@@ -114,4 +102,20 @@ fn validate_flag(msg: &str, flag: c_uchar) {
 		1 => panic!("{}: failure detected in ffi code", msg),
 		_ => panic!("{}: unexpected flag value: {}", msg, flag),
 	}
+}
+
+fn lattice_matrix(dim: Trip<Float>) -> Vec<Float> {
+	let mut lattice = vec![
+		dim.0, 0., 0.,
+		0., dim.1, 0.,
+		0., 0., dim.2,
+	];
+
+	for k in 0..3 {
+		if ::IS_VACUUM.into_nth(k) {
+			lattice[3*k+k] = 0.;
+		}
+	}
+
+	lattice
 }
