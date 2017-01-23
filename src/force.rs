@@ -1,6 +1,7 @@
 
 use common::*;
 
+use Tree;
 use fire::Fire;
 
 use ::std::io::Write;
@@ -30,19 +31,22 @@ pub struct Params {
 //
 // You do not need a generalized "Sum of forces" type.
 // This is perfectly fine just the way it is.
-#[derive(PartialEq,Clone,Debug)]
+#[derive(PartialEq,Debug)]
 pub struct Composite {
 	radial: Radial,
 	angular: Angular,
-	rebo: Rebo,
+	rebo: PersistentRebo,
 }
 
 impl Composite {
-	pub fn prepare(params: Params, free_indices: &Set<usize>, parents: &[usize]) -> Self {
+	/// Behavior is undefined if a Composite with an active Rebo is prepared when another
+	/// already exists.
+	pub unsafe fn prepare(params: Params, tree: &Tree, free_indices: &Set<usize>) -> Self {
+		let parents = &tree.parents;
 		Composite {
 			radial: Radial::prepare(params.radial, free_indices, parents),
 			angular: Angular::prepare(params.angular, free_indices, parents),
-			rebo: Rebo(params.rebo),
+			rebo: PersistentRebo::prepare(params.rebo, &tree),
 		}
 	}
 
@@ -52,7 +56,7 @@ impl Composite {
 	// * Writes detailed stats to debug files.
 	// It is _quite decidedly_ not pure.
 	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) -> f64 {
-		let subtotal_rebo    = self.rebo.tally(md, ffile.as_mut(), free_indices, dim);
+		let subtotal_rebo    = unsafe { self.rebo.tally(md, ffile.as_mut(), free_indices, dim) };
 		let subtotal_radial  = self.radial.tally(md, ffile.as_mut(), free_indices, dim);
 		let subtotal_angular = self.angular.tally(md, ffile.as_mut(), free_indices, dim);
 
@@ -131,8 +135,12 @@ pub struct Angular {
 
 #[derive(PartialEq,Copy,Clone,Debug)]
 pub struct Rebo(pub bool);
+#[derive(PartialEq,Debug)]
+pub struct PersistentRebo(bool);
 
 impl Rebo {
+	pub fn prepare(active: bool, _tree: &Tree) -> Self { Rebo(active) }
+
 	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) -> f64 {
 		if !self.0 { return 0.; }
 
@@ -142,7 +150,47 @@ impl Rebo {
 
 		for &i in free_indices {
 			for file in &mut ffile {
-				writeln!(file, "REB:{} F= {} {} {}", i, force[3*i], force[3*i+1], force[3*i+2]).unwrap();
+				if ::FORCE_DEBUG == ::ForceDebug::Full {
+					writeln!(file, "REB:{} F= {} {} {}", i, force[3*i], force[3*i+1], force[3*i+2]).unwrap();
+				}
+			}
+
+			for k in 0..3 {
+				md.force[3*i + k] += force[3*i + k];
+			}
+		}
+
+		potential
+	}
+}
+
+impl PersistentRebo {
+	/// Behavior is undefined if this is used to create an active PersistentRebo
+	/// when another one already exists.
+	pub unsafe fn prepare(active: bool, tree: &Tree) -> Self {
+		if active {
+			::ffi::persistent_init(flatten(&tree.pos), tree.dimension);
+		}
+		PersistentRebo(active)
+	}
+
+	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, _dim: Trip<Float>) -> f64 {
+		if !self.0 { return 0.; }
+
+		let (potential,force) = unsafe { ::ffi::persistent_calc(md.position.clone()) };
+		if ::VALIDATE_REBO {
+			let (epotential,eforce) = unsafe { ::ffi::calc_rebo_flat(md.position.clone(), _dim) };
+			assert_eq!(potential, epotential);
+			assert_eq!(force, eforce);
+		}
+
+		md.potential += potential;
+
+		for &i in free_indices {
+			for file in &mut ffile {
+				if ::FORCE_DEBUG == ::ForceDebug::Full {
+					writeln!(file, "REB:{} F= {} {} {}", i, force[3*i], force[3*i+1], force[3*i+2]).unwrap();
+				}
 			}
 
 			for k in 0..3 {
@@ -189,7 +237,9 @@ impl Radial {
 			let f = normalize(dvec).mul_s(signed_force);
 
 			for file in &mut ffile {
-				writeln!(file, "RAD:{}:{} V= {} F= {} {} {}", i, j, potential, f.0, f.1, f.2).unwrap();
+				if ::FORCE_DEBUG == ::ForceDebug::Full {
+					writeln!(file, "RAD:{}:{} V= {} F= {} {} {}", i, j, potential, f.0, f.1, f.2).unwrap();
+				}
 			}
 
 			// Note to self:
@@ -287,7 +337,9 @@ impl Angular {
 				let f = applyV(inv, f);
 
 				for file in &mut ffile {
-					writeln!(file, "ANG:{}:{}:{} V= {} F= {} {} {}", i, j, k, potential, f.0, f.1, f.2).unwrap();
+					if ::FORCE_DEBUG == ::ForceDebug::Full {
+						writeln!(file, "ANG:{}:{}:{} V= {} F= {} {} {}", i, j, k, potential, f.0, f.1, f.2).unwrap();
+					}
 				}
 
 				// ultimately, the two outer atoms (i, k) get pulled in similar (but not parallel)

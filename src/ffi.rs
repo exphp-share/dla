@@ -38,7 +38,7 @@ pub fn calc_rebo_flat(mut pos: Vec<f64>, dim: Trip<f64>) -> (f64, Vec<f64>) {
 	(potential, grad.into_iter().map(|x| -x).collect())
 }
 
-unsafe fn persistent_init(mut pos: Vec<f64>, dim: Trip<f64>) {
+pub unsafe fn persistent_init(mut pos: Vec<f64>, dim: Trip<f64>) {
 	assert!(pos.iter().all(|&p| p == p));
 	assert!(pos.len()%3 == 0);
 
@@ -56,7 +56,7 @@ unsafe fn persistent_init(mut pos: Vec<f64>, dim: Trip<f64>) {
 	});
 }
 
-unsafe fn persistent_calc(mut pos: Vec<f64>) -> (f64, Vec<f64>) {
+pub unsafe fn persistent_calc(mut pos: Vec<f64>) -> (f64, Vec<f64>) {
 	assert!(pos.iter().all(|&p| p == p));
 	assert!(pos.len()%3 == 0);
 

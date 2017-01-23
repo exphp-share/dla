@@ -19,7 +19,7 @@ dependencies = [
 [[package]]
 name = "dla_sys"
 version = "0.1.0"
-source = "git+file:///home/lampam/asd/class/research/dla-sys#e61ecece4ffee86d936c37c23006c3982697234f"
+source = "git+file:///home/lampam/asd/class/research/dla-sys#31617417f1c5e3cabc48d17518002a2cfc7e926f"
 dependencies = [
  "libc 0.2.20 (registry+https://github.com/rust-lang/crates.io-index)",
 ]

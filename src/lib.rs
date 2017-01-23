@@ -16,8 +16,12 @@ const IS_VACUUM: Trip<bool> = (true, true, true);
 const NPARTICLE: usize = 200;
 
 const DEBUG: bool = false; // generates a general debug file
-const XYZ_DEBUG: bool = false; // creates "xyz-debug/event-*.xyz"  files
-const FORCE_DEBUG: bool = false; // creates "xyz-debug/force-*"
+const XYZ_DEBUG: Option<usize> = Some(30); // creates "xyz-debug/event-*.xyz"  files
+const FORCE_DEBUG: ForceDebug = ForceDebug::Summary; // creates "xyz-debug/force-*"
+const VALIDATE_REBO: bool = false;
+
+#[derive(Copy,Clone,Debug,PartialOrd,Ord,Eq,PartialEq,Hash)]
+enum ForceDebug { None, Summary, Full }
 
 // For easily switching forces on/off
 const FORCE_PARAMS: ::force::Params = FORCE_PARAMS_SRC;
@@ -25,8 +29,8 @@ const FORCE_PARAMS: ::force::Params = FORCE_PARAMS_SRC;
 //const FORCE_PARAMS: ::force::Params = WITHOUT_REBO;
 
 const FORCE_PARAMS_SRC: ::force::Params = ::force::Params {
-	radial: Model::Morse { center: 1.41, D: 100., k: 40. },
-	angular: Model::Quadratic { center: (120.*PI/180.), k: 40. },
+	radial: Model::Morse { center: 1.41, D: 100., k: 400. },
+	angular: Model::Quadratic { center: (120.*PI/180.), k: 400. },
 	rebo: true,
 };
 
@@ -100,7 +104,7 @@ fn dla_run() -> Tree {
 	let final_particles = PER_STEP*NPARTICLE + tree.len();
 
 	for dla_step in 0..NPARTICLE {
-		errln!("Particle {:8} of {:8}: ", dla_step, NPARTICLE);
+		err!("Particle {:8} of {:8}: ", dla_step, NPARTICLE);
 
 		let mut finder = NeighborFinder::from_positions(tree.dimension, tree.pos.clone());
 
@@ -167,7 +171,7 @@ fn dla_run() -> Tree {
 			//relax_suffix_using_fire(&mut tree, n_fixed, |md| { // relax new
 			//relax_suffix_using_fire(&mut tree, 6, force_debug_file, |md| { // relax all XXX
 			//relax_suffix_using_fire(&mut tree, 0, force_debug_file, |md| { // relax all XXX
-			let reason = relax_with_files(FORCE_PARAMS, &mut tree, free_indices, &format!("{:06}", dla_step), |md| { // relax all XXX
+			let reason = unsafe { relax_with_files(FORCE_PARAMS, &mut tree, free_indices, &format!("{:06}", dla_step), |md| { // relax all XXX
 
 				for file in &mut debug_file {
 					writeln!(file, "F {} {} {} {} {}", dla_step, md.nstep, md.alpha, md.timestep, md.cooldown).unwrap();
@@ -179,7 +183,7 @@ fn dla_run() -> Tree {
 				}
 
 				n_relax_steps = md.nstep; // only the final assigned value will remain
-			});
+			})};
 			(n_relax_steps, reason)
 		};
 
@@ -205,11 +209,11 @@ fn dla_run() -> Tree {
 
 		let carbons = tree.carbons();
 		let mut n_steps = 0;
-		let reason = relax_with_files(FORCE_PARAMS, &mut tree, carbons, "end-a", |md| {
+		let reason = unsafe { relax_with_files(FORCE_PARAMS, &mut tree, carbons, "end-a", |md| {
 			// FIXME bah if I'm going to keep doing this sort of hack to get number of steps
 			//   then it ought to just be an output.
 			n_steps = md.nstep;
-		});
+		})};
 		write_xyz(&mut stdout(), &tree, None);
 		errln!(" done in {} steps after {:?}...", n_steps, reason);
 	}
@@ -219,9 +223,9 @@ fn dla_run() -> Tree {
 
 		let carbons = tree.carbons();
 		let mut n_steps = 0;
-		let reason = relax_with_files(JUST_REBO, &mut tree, carbons, "end-b", |md| {
+		let reason = unsafe { relax_with_files(JUST_REBO, &mut tree, carbons, "end-b", |md| {
 			n_steps = md.nstep;
-		});
+		}) };
 		write_xyz(&mut stdout(), &tree, None);
 		errln!(" done in {} steps after {:?}...", n_steps, reason);
 	}
@@ -253,35 +257,39 @@ fn run_reruns_on(path: &str) {
 		params.angular.set_spring_constant(k).expect("kek");
 
 		let mut n_relax_steps = 0;
-		let reason = relax_with_files(params, &mut tree, free_indices.clone(), &format!("reruns-{:03}", step),
-			|md| {n_relax_steps = md.nstep});
+		let reason = unsafe { relax_with_files(params, &mut tree, free_indices.clone(), &format!("reruns-{:03}", step),
+			|md| {n_relax_steps = md.nstep}) };
 
 		errln!("Step {:03} ended in {} steps after {:?}", step, n_relax_steps, reason);
 		write_xyz(&mut file, &tree, None);
 	}
 }
 
-fn relax_with_files<C,I>(params: ::force::Params, tree: &mut Tree, free_indices: I, file_id: &str, mut cb: C) -> ::fire::StopReason
+/// Not reentrant; behavior is undefined if the callback also calls this function.
+unsafe fn relax_with_files<C,I>(params: ::force::Params, tree: &mut Tree, free_indices: I, file_id: &str, mut cb: C) -> ::fire::StopReason
 where C:FnMut(&Fire), I: IntoIterator<Item=usize>,
 {
 	let labels = tree.labels.clone();
-	let force_file = cond_file!(FORCE_DEBUG, "xyz-debug/force-{}", file_id);
-	let mut xyz_file = cond_file!(XYZ_DEBUG, "xyz-debug/event-{}.xyz", file_id);
+	let force_file = cond_file!(FORCE_DEBUG > ForceDebug::None, "xyz-debug/force-{}", file_id);
+	let mut xyz_file = cond_file!(XYZ_DEBUG.is_some(), "xyz-debug/event-{}.xyz", file_id);
 
 	relax_using_fire(params, tree, free_indices, force_file, |md| {
 		for file in &mut xyz_file {
-			write_xyz_(file, unflatten(&md.position), labels.clone(), None);
+			if md.nstep % XYZ_DEBUG.unwrap() == 0 {
+				write_xyz_(file, unflatten(&md.position), labels.clone(), None);
+			}
 		}
 		cb(&md);
 	})
 }
 
-fn relax_using_fire<C, I, W>(params: ::force::Params, tree: &mut Tree, free_indices: I, ffile: Option<W>, mut cb: C) -> ::fire::StopReason
+/// Not reentrant; behavior is undefined if the callback also calls this function.
+unsafe fn relax_using_fire<C, I, W>(params: ::force::Params, tree: &mut Tree, free_indices: I, ffile: Option<W>, mut cb: C) -> ::fire::StopReason
 where C:FnMut(&Fire), I: IntoIterator<Item=usize>, W: Write,
 {
 	let free_indices = free_indices.into_iter().collect();
 
-	let force = ::force::Composite::prepare(params, &free_indices, &tree.parents);
+	let force = ::force::Composite::prepare(params, &tree, &free_indices);
 
 	let ffile = ::std::cell::RefCell::new(ffile);
 	let (pos,reason) = {
@@ -356,7 +364,7 @@ use force::Model;
 use fire::Fire;
 
 #[derive(Copy,Clone,Eq,PartialEq,Ord,PartialOrd,Hash,Serialize,Deserialize,Debug)]
-enum Label { C, Si }
+pub enum Label { C, Si }
 impl Label {
 	pub fn as_str(&self) -> &'static str {
 		match *self {
@@ -370,7 +378,7 @@ impl Label {
 
 // NOTE misnomer; not actually a tree; the first two atoms point to each other
 #[derive(Debug,Clone,Serialize,Deserialize)]
-struct Tree {
+pub struct Tree {
 	labels: Vec<Label>,
 	pos: Vec<Trip<Cart>>,
 	parents: Vec<usize>,
@@ -540,7 +548,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	tree.perturb_mut(0.1);
 
 	let free_indices = 0..tree.len();
-	let reason = relax_with_files(FORCE_PARAMS, &mut tree, free_indices, "start", |_| {});
+	let reason = unsafe { relax_with_files(FORCE_PARAMS, &mut tree, free_indices, "start", |_| {}) };
 	match reason {
 		::fire::StopReason::Convergence => tree,
 		::fire::StopReason::Flailing => {
