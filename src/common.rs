@@ -1,8 +1,12 @@
 
 use nalgebra as na;
 
+use ::std::f64::INFINITY;
+
 use ::homogenous::prelude::*;
 use ::homogenous::numeric::prelude::*;
+use ::serde::{Serialize,Deserialize};
+use ::rand::Rng;
 
 macro_rules! err {
 	($($args:tt)*) => {{
@@ -40,27 +44,8 @@ pub fn na_z(r: Float) -> NaVector3 { NaVector3{z:r, ..na::zero()} }
 // Make frac coords a newtype which is incompatible with other floats, to help prove that
 // fractional/cartesian conversions are handled properly.
 
-#[derive(Debug,PartialEq,PartialOrd,Copy,Clone)]
-pub struct Frac(pub Float);
 pub type Cart = Float;
-pub trait CartExt { fn frac(self, dimension: Float) -> Frac; }
-impl CartExt for Cart { fn frac(self, dimension: Float) -> Frac { Frac(self/dimension) } }
 
-impl Frac { pub fn cart(self, dimension: Float) -> Cart { self.0*dimension } }
-
-// add common binops to eliminate the majority of reasons I might need to
-// convert back into floats (which would render the type system useless)
-newtype_ops!{ [Frac] arithmetic {:=} {^&}Self {^&}{Self} }
-
-// cart() and frac() methods for triples
-pub trait ToCart { fn cart(self, dimension: Trip<Float>) -> Trip<Cart>; }
-pub trait ToFrac { fn frac(self, dimension: Trip<Float>) -> Trip<Frac>; }
-impl ToCart for Trip<Frac> { fn cart(self, dimension: Trip<Float>) -> Trip<Cart> { zip_with!((self,dimension) |x,d| x.cart(d)) } }
-impl ToFrac for Trip<Cart> { fn frac(self, dimension: Trip<Float>) -> Trip<Frac> { zip_with!((self,dimension) |x,d| x.frac(d)) } }
-impl ToCart for Trip<Cart> { fn cart(self, _dimension: Trip<Float>) -> Trip<Cart> { self } }
-impl ToFrac for Trip<Frac> { fn frac(self, _dimension: Trip<Float>) -> Trip<Frac> { self } }
-
-// nalgebra interop, but strictly for cartesian
 pub fn to_na_vector((x,y,z): Trip<Cart>) -> NaVector3{ NaVector3 { x: x, y: y, z: z } }
 pub fn to_na_point((x,y,z): Trip<Cart>)  -> NaPoint3{ NaPoint3  { x: x, y: y, z: z } }
 
@@ -69,30 +54,6 @@ pub fn from_na_point(NaPoint3 {x,y,z}: NaPoint3) -> Trip<Cart> { (x,y,z) }
 
 pub fn as_na_vector<F:FnMut(NaVector3) -> NaVector3>(p: Trip<Cart>, mut f: F) -> Trip<Cart> { from_na_vector(f(to_na_vector(p))) }
 pub fn as_na_point<F:FnMut(NaPoint3) -> NaPoint3>(p: Trip<Cart>, mut f: F) -> Trip<Cart> { from_na_point(f(to_na_point(p))) }
-
-pub fn reduce_pbc(this: Trip<Frac>) -> Trip<Frac> { this.map(|Frac(x)| Frac((x.fract() + 1.0).fract())) }
-pub fn nearest_image_sub<P:ToFrac,Q:ToFrac>(this: P, that: Q, dimension: Trip<Float>) -> Trip<Cart> {
-	// assumes a diagonal cell
-	let this = this.frac(dimension);
-	let that = that.frac(dimension);
-	let diff = this.sub_v(that)
-		.map(|Frac(x)| Frac(x - x.round())); // range [0.5, -0.5]
-
-	diff.map(|Frac(x)| assert!(-0.5-1e-5 <= x && x <= 0.5+1e-5));
-	diff.cart(dimension)
-}
-
-pub fn nearest_image_dist_sq<P:ToFrac,Q:ToFrac>(this: P, that: Q, dimension: Trip<Float>) -> Cart {
-	nearest_image_sub(this, that, dimension).sqnorm()
-}
-
-
-// Get a "look at" isometry; it maps the origin to the eye, and +z towards the target.
-// (The up direction is arbitrarily chosen, without risk of it being invalid)
-pub fn look_at_pbc(eye: Trip<Cart>, target: Trip<Cart>, dimension: Trip<Float>) -> NaIso {
-	let (_,θ,φ) = spherical_from_cart(nearest_image_sub(target, eye, dimension));
-	translate(eye) * rotate_z(φ) * rotate_y(θ)
-}
 
 pub fn spherical_from_cart((x,y,z): Trip<Cart>) -> Trip<Float> {
 	let ρ = (x*x + y*y).sqrt();
@@ -119,6 +80,67 @@ pub fn cart_from_spherical((r,θ,φ): Trip<Float>) -> Trip<Cart> {
 	let (sinθ,cosθ) = (θ.sin(), θ.cos());
 	let (sinφ,cosφ) = (φ.sin(), φ.cos());
 	(r*sinθ*cosφ, r*sinθ*sinφ, r*cosθ)
+}
+
+//-------------------------------------
+
+// output range of [0, b]
+fn mod_floor(x: f64, b: f64) -> f64 { x - b * (x/b).floor() }
+// output range of [-b/2, b/2]
+fn mod_round(x: f64, b: f64) -> f64 { x - b * (x/b).round() }
+
+// a diagonal unit cell
+#[derive(Copy,Clone,Debug,PartialEq,Serialize,Deserialize)]
+pub struct Pbc {
+	pub dim: Trip<f64>,
+	pub vacuum: Trip<bool>,
+}
+
+impl Pbc {
+	// image of point in unit cell
+	pub fn wrap(&self, point: Trip<Cart>) -> Trip<Cart> {
+		zip_with!((self.dim, point) |dim,x| mod_floor(x, dim))
+	}
+
+	// fractional coordinates of point
+	pub fn frac(&self, point: Trip<Cart>) -> Trip<Float> {
+		zip_with!((self.dim, point) |dim,x| x / dim)
+	}
+
+	// nearest image displacement (p - q)
+	pub fn nearest_image_sub(&self, p: Trip<Cart>, q: Trip<Cart>) -> Trip<Cart> {
+		zip_with!((self.dim, p, q) |dim,p,q| mod_round(p - q, dim))
+	}
+
+	// image of "of" nearest "by"
+	pub fn nearest_image_of(&self, of: Trip<Cart>, by: Trip<Cart>) -> Trip<Cart> {
+		by.add_v(self.nearest_image_sub(of, by))
+	}
+
+	// distance to nearest vacuum border
+	pub fn vacuum_border_distance(&self, point: Trip<Cart>) -> Cart {
+		zip_with!((self.dim, self.vacuum, point) |dim,vacuum,x|
+			if vacuum { mod_round(x, dim).abs() }
+			else { INFINITY }
+		).iter().fold(INFINITY, |a,&b| a.min(b))
+	}
+
+	// point-to-point distance (nearest image)
+	pub fn distance(&self, p: Trip<Cart>, q: Trip<Cart>) -> f64 { self.nearest_image_sub(p,q).sqnorm().sqrt() }
+
+	// unit cell center position
+	pub fn center(&self) -> Trip<Cart> { self.dim.mul_s(0.5) }
+
+	// Get a "look at" isometry; it maps the origin to the eye, and +z towards the target.
+	// (The up direction is arbitrarily chosen, without risk of it being invalid)
+	pub fn look_at(&self, eye: Trip<Cart>, target: Trip<Cart>) -> NaIso {
+		let (_,θ,φ) = spherical_from_cart(self.nearest_image_sub(target, eye));
+		translate(eye) * rotate_z(φ) * rotate_y(θ)
+	}
+
+	pub fn random_point_in_volume<R:Rng>(&self, mut rng: R) -> Trip<Cart> {
+		self.dim.map(|dim| dim * rng.next_f64())
+	}
 }
 
 //-------------------------------------

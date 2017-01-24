@@ -6,18 +6,18 @@ use ::std::io::Write;
 use ::libc::c_int;
 use ::libc::c_uchar;
 
-pub fn calc_rebo(pos: Vec<Trip<f64>>, dim: Trip<f64>) -> (f64, Vec<Trip<f64>>) {
-	let (pot, grad) = calc_rebo_flat(flatten(&pos), dim);
+pub fn calc_rebo(pos: Vec<Trip<f64>>, pbc: Pbc) -> (f64, Vec<Trip<f64>>) {
+	let (pot, grad) = calc_rebo_flat(flatten(&pos), pbc);
 	(pot, unflatten(&grad))
 }
 
 
-pub fn calc_rebo_flat(mut pos: Vec<f64>, dim: Trip<f64>) -> (f64, Vec<f64>) {
+pub fn calc_rebo_flat(mut pos: Vec<f64>, pbc: Pbc) -> (f64, Vec<f64>) {
 	// no NaNs allowed
 	assert!(pos.iter().all(|&p| p == p));
 	assert!(pos.len()%3 == 0);
 
-	let mut lattice = lattice_matrix(dim);
+	let mut lattice = lattice_matrix(pbc);
 
 	// ffi outputs
 	let mut grad = vec![0.; pos.len()];
@@ -34,11 +34,11 @@ pub fn calc_rebo_flat(mut pos: Vec<f64>, dim: Trip<f64>) -> (f64, Vec<f64>) {
 	(potential, grad.into_iter().map(|x| -x).collect())
 }
 
-pub unsafe fn persistent_init(mut pos: Vec<f64>, dim: Trip<f64>) {
+pub unsafe fn persistent_init(mut pos: Vec<f64>, pbc: Pbc) {
 	assert!(pos.iter().all(|&p| p == p));
 	assert!(pos.len()%3 == 0);
 
-	let mut lattice = lattice_matrix(dim);
+	let mut lattice = lattice_matrix(pbc);
 
 	validate_flag("persistent_init", { // scope &mut borrows
 		let c_n = (pos.len() / 3) as c_int;
@@ -65,17 +65,17 @@ pub unsafe fn persistent_calc(mut pos: Vec<f64>) -> (f64, Vec<f64>) {
 	(potential, grad.into_iter().map(|x| -x).collect())
 }
 
-pub fn rebo_relax_all(pos: Vec<Trip<Cart>>, dim: Trip<f64>) -> Vec<Trip<Cart>> {
+pub fn rebo_relax_all(pos: Vec<Trip<Cart>>, pbc: Pbc) -> Vec<Trip<Cart>> {
 	let n = pos.len();
-	rebo_relax(pos, vec![false; n], dim)
+	rebo_relax(pos, vec![false; n], pbc)
 }
 
-pub fn rebo_relax(pos: Vec<Trip<Cart>>, fixed: Vec<bool>, dim: Trip<f64>) -> Vec<Trip<Cart>> {
+pub fn rebo_relax(pos: Vec<Trip<Cart>>, fixed: Vec<bool>, pbc: Pbc) -> Vec<Trip<Cart>> {
 	// NOTE: this brazenly assumes that [(f64,f64,f64); n] and #[repr(C)] [f64; 3*n]
 	//       have the same representation.
 
 	assert_eq!(fixed.len(), pos.len());
-	let mut lattice = lattice_matrix(dim);
+	let mut lattice = lattice_matrix(pbc);
 
 	let mut pos = pos;
 	let mut fixed: Vec<_> = fixed.into_iter().map(|f| match f { true => 1, false => 0 } as c_uchar).collect();
@@ -104,18 +104,17 @@ fn validate_flag(msg: &str, flag: c_uchar) {
 	}
 }
 
-fn lattice_matrix(dim: Trip<Float>) -> Vec<Float> {
+fn lattice_matrix(pbc: Pbc) -> Vec<Float> {
 	let mut lattice = vec![
-		dim.0, 0., 0.,
-		0., dim.1, 0.,
-		0., 0., dim.2,
+		pbc.dim.0, 0., 0.,
+		0., pbc.dim.1, 0.,
+		0., 0., pbc.dim.2,
 	];
 
-	for k in 0..3 {
-		if ::IS_VACUUM.into_nth(k) {
-			lattice[3*k+k] = 0.;
-		}
-	}
+	// designate aperiodic axes
+	if pbc.vacuum.0 { lattice[0*3 + 0] = 0. }
+	if pbc.vacuum.1 { lattice[1*3 + 1] = 0. }
+	if pbc.vacuum.2 { lattice[2*3 + 2] = 0. }
 
 	lattice
 }
