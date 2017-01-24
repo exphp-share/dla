@@ -160,19 +160,8 @@ fn dla_run() -> Tree {
 		};
 
 		let n_free = free_indices.len();
-//		let mut n_free = PER_STEP;
 		let (n_relax_steps, stop_reason) = {
-//			let n_total = tree.len();
-
-//			let n_fixed = n_total - n_free;
-
-			let mut n_relax_steps = 0; // prepare for more abominable hax...
-
-			//relax_suffix_using_fire(&mut tree, n_fixed, |md| { // relax new
-			//relax_suffix_using_fire(&mut tree, 6, force_debug_file, |md| { // relax all XXX
-			//relax_suffix_using_fire(&mut tree, 0, force_debug_file, |md| { // relax all XXX
-			let reason = unsafe { relax_with_files(FORCE_PARAMS, &mut tree, free_indices, &format!("{:06}", dla_step), |md| { // relax all XXX
-
+			unsafe { relax_with_files(FORCE_PARAMS, &mut tree, free_indices, &format!("{:06}", dla_step), |md| {
 				for file in &mut debug_file {
 					writeln!(file, "F {} {} {} {} {}", dla_step, md.nstep, md.alpha, md.timestep, md.cooldown).unwrap();
 					for i in 0..md.position.len()/3 {
@@ -181,10 +170,7 @@ fn dla_run() -> Tree {
 						writeln!(file, "A {} {} {} {:.6} {:.6}", dla_step, md.nstep, i, v, f).unwrap();
 					}
 				}
-
-				n_relax_steps = md.nstep; // only the final assigned value will remain
-			})};
-			(n_relax_steps, reason)
+			})}
 		};
 
 		// debugging info
@@ -193,13 +179,13 @@ fn dla_run() -> Tree {
 			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free, n_relax_steps, stop_reason
 		);
 
-		write_xyz(&mut stdout(), &tree, Some(final_particles));
+		write_xyz(stdout(), &tree, Some(final_particles));
 	}
 
 	{
 		let dimension = tree.dimension;
 		let pos = tree.pos.clone().into_iter().map(|x| reduce_pbc(x.frac(dimension)).cart(dimension));
-		write_xyz_(&mut stdout(), pos, tree.labels.clone(), None);
+		write_xyz_(stdout(), pos, tree.labels.clone(), None);
 	}
 	assert_eq!(final_particles, tree.len());
 
@@ -208,13 +194,8 @@ fn dla_run() -> Tree {
 		err!("Relaxing full structure...");
 
 		let carbons = tree.carbons();
-		let mut n_steps = 0;
-		let reason = unsafe { relax_with_files(FORCE_PARAMS, &mut tree, carbons, "end-a", |md| {
-			// FIXME bah if I'm going to keep doing this sort of hack to get number of steps
-			//   then it ought to just be an output.
-			n_steps = md.nstep;
-		})};
-		write_xyz(&mut stdout(), &tree, None);
+		let (n_steps, reason) = unsafe { relax_with_files(FORCE_PARAMS, &mut tree, carbons, "end-a", |_| {}) };
+		write_xyz(stdout(), &tree, None);
 		errln!(" done in {} steps after {:?}...", n_steps, reason);
 	}
 
@@ -222,11 +203,8 @@ fn dla_run() -> Tree {
 		err!("Relaxing with REBO...");
 
 		let carbons = tree.carbons();
-		let mut n_steps = 0;
-		let reason = unsafe { relax_with_files(JUST_REBO, &mut tree, carbons, "end-b", |md| {
-			n_steps = md.nstep;
-		}) };
-		write_xyz(&mut stdout(), &tree, None);
+		let (n_steps, reason) = unsafe { relax_with_files(JUST_REBO, &mut tree, carbons, "end-b", |_| {}) };
+		write_xyz(stdout(), &tree, None);
 		errln!(" done in {} steps after {:?}...", n_steps, reason);
 	}
 	
@@ -256,9 +234,9 @@ fn run_reruns_on(path: &str) {
 		params.radial.set_spring_constant(k).expect("kek");
 		params.angular.set_spring_constant(k).expect("kek");
 
-		let mut n_relax_steps = 0;
-		let reason = unsafe { relax_with_files(params, &mut tree, free_indices.clone(), &format!("reruns-{:03}", step),
-			|md| {n_relax_steps = md.nstep}) };
+		let (n_relax_steps, reason) = unsafe {
+			relax_with_files(params, &mut tree, free_indices.clone(), &format!("reruns-{:03}", step), |_| {})
+		};
 
 		errln!("Step {:03} ended in {} steps after {:?}", step, n_relax_steps, reason);
 		write_xyz(&mut file, &tree, None);
@@ -266,7 +244,7 @@ fn run_reruns_on(path: &str) {
 }
 
 /// Not reentrant; behavior is undefined if the callback also calls this function.
-unsafe fn relax_with_files<C,I>(params: ::force::Params, tree: &mut Tree, free_indices: I, file_id: &str, mut cb: C) -> ::fire::StopReason
+unsafe fn relax_with_files<C,I>(params: ::force::Params, tree: &mut Tree, free_indices: I, file_id: &str, mut cb: C) -> (usize, ::fire::StopReason)
 where C:FnMut(&Fire), I: IntoIterator<Item=usize>,
 {
 	let labels = tree.labels.clone();
@@ -284,7 +262,7 @@ where C:FnMut(&Fire), I: IntoIterator<Item=usize>,
 }
 
 /// Not reentrant; behavior is undefined if the callback also calls this function.
-unsafe fn relax_using_fire<C, I, W>(params: ::force::Params, tree: &mut Tree, free_indices: I, ffile: Option<W>, mut cb: C) -> ::fire::StopReason
+unsafe fn relax_using_fire<C, I, W>(params: ::force::Params, tree: &mut Tree, free_indices: I, ffile: Option<W>, mut cb: C) -> (usize, ::fire::StopReason)
 where C:FnMut(&Fire), I: IntoIterator<Item=usize>, W: Write,
 {
 	let free_indices = free_indices.into_iter().collect();
@@ -292,7 +270,7 @@ where C:FnMut(&Fire), I: IntoIterator<Item=usize>, W: Write,
 	let force = ::force::Composite::prepare(params, &tree, &free_indices);
 
 	let ffile = ::std::cell::RefCell::new(ffile);
-	let (pos,reason) = {
+	let (pos,out) = {
 		Fire::init(RELAX_PARAMS, flatten(&tree.pos.clone()))
 		// cb to write forces before fire
 		.relax(|md| {
@@ -316,7 +294,7 @@ where C:FnMut(&Fire), I: IntoIterator<Item=usize>, W: Write,
 	};
 
 	tree.dangerously_reassign_positions(unflatten(&pos));
-	reason
+	out
 }
 
 
@@ -479,12 +457,12 @@ fn zero_forces(mut md: Fire) -> Fire {
 
 //---------- DLA
 
-fn random_direction<R:Rng>(rng: &mut R) -> Trip<Cart> {
+fn random_direction<R:Rng>(mut rng: R) -> Trip<Cart> {
 	let normal = Normal::new(0.0, 1.0);
-	normalize(((),(),()).map(|_| normal.ind_sample(rng) as Float))
+	normalize(((),(),()).map(|_| normal.ind_sample(&mut rng) as Float))
 }
 
-fn random_border_position<R:Rng>(rng: &mut R) -> Trip<Frac> {
+fn random_border_position<R:Rng>(mut rng: R) -> Trip<Frac> {
 	// random point
 	let mut point = ((),(),()).map(|_| Frac(rng.next_f64() as Float));
 
@@ -515,7 +493,7 @@ fn barbell_nucleus(dimension: Trip<f64>) -> Tree {
 }
 
 fn random_barbell_nucleus(dimension: Trip<f64>) -> Tree {
-	let dir = random_direction(&mut rand::weak_rng());
+	let dir = random_direction(rand::weak_rng());
 	let pos1 = ((),(),()).map(|_| Frac(rand::weak_rng().next_f64())).cart(dimension);
 	let pos2 = pos1.add_v(dir.mul_s(DIMER_INITIAL_SEP));
 	let mut tree = Tree::from_two_pos(dimension, (pos1,pos2), (Label::Si, Label::C));
@@ -548,7 +526,7 @@ fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
 	tree.perturb_mut(0.1);
 
 	let free_indices = 0..tree.len();
-	let reason = unsafe { relax_with_files(FORCE_PARAMS, &mut tree, free_indices, "start", |_| {}) };
+	let (_,reason) = unsafe { relax_with_files(FORCE_PARAMS, &mut tree, free_indices, "start", |_| {}) };
 	match reason {
 		::fire::StopReason::Convergence => tree,
 		::fire::StopReason::Flailing => {

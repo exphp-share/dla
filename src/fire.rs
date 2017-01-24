@@ -94,7 +94,7 @@ impl Fire
 		}
 	}
 
-	pub fn relax<G,H>(mut self, mut force_writer: G, mut post_fire: H) -> (Vec<f64>, StopReason)
+	pub fn relax<G,H>(mut self, mut force_writer: G, mut post_fire: H) -> (Vec<f64>, (usize, StopReason))
 	where G: FnMut(Self) -> Self, H: FnMut(&Self)
 	{
 		self.nstep = 0;
@@ -136,7 +136,7 @@ impl Fire
 			}
 
 			if let Some(reason) = self.stop_reason() {
-				return (self.position, reason);
+				return (self.position, (self.nstep, reason));
 			}
 
 			self.step_fire();
