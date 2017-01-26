@@ -55,10 +55,10 @@ impl Composite {
 	// * Return the total potential added. (usually for debug output one level up)
 	// * Writes detailed stats to debug files.
 	// It is _quite decidedly_ not pure.
-	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) -> f64 {
-		let subtotal_rebo    = unsafe { self.rebo.tally(md, ffile.as_mut(), free_indices, dim) };
-		let subtotal_radial  = self.radial.tally(md, ffile.as_mut(), free_indices, dim);
-		let subtotal_angular = self.angular.tally(md, ffile.as_mut(), free_indices, dim);
+	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, pbc: Pbc) -> f64 {
+		let subtotal_rebo    = unsafe { self.rebo.tally(md, ffile.as_mut(), free_indices, pbc) };
+		let subtotal_radial  = self.radial.tally(md, ffile.as_mut(), free_indices, pbc);
+		let subtotal_angular = self.angular.tally(md, ffile.as_mut(), free_indices, pbc);
 
 		for file in &mut ffile {
 			writeln!(file, "SUBTOTAL REBO    V= {:22.18}", subtotal_rebo).unwrap();
@@ -141,10 +141,10 @@ pub struct PersistentRebo(bool);
 impl Rebo {
 	pub fn prepare(active: bool, _tree: &Tree) -> Self { Rebo(active) }
 
-	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) -> f64 {
+	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, pbc: Pbc) -> f64 {
 		if !self.0 { return 0.; }
 
-		let (potential,force) = ::ffi::calc_rebo_flat(md.position.clone(), dim);
+		let (potential,force) = ::ffi::calc_rebo_flat(md.position.clone(), pbc);
 
 		md.potential += potential;
 
@@ -169,19 +169,19 @@ impl PersistentRebo {
 	/// when another one already exists.
 	pub unsafe fn prepare(active: bool, tree: &Tree) -> Self {
 		if active {
-			::ffi::persistent_init(flatten(&tree.pos), tree.dimension);
+			::ffi::persistent_init(flatten(&tree.pos), tree.pbc);
 		}
 		PersistentRebo(active)
 	}
 
-	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, _dim: Trip<Float>) -> f64 {
+	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, pbc: Pbc) -> f64 {
 		if !self.0 { return 0.; }
 
 		let (potential,force) = unsafe { ::ffi::persistent_calc(md.position.clone()) };
 		if ::VALIDATE_REBO {
-			let (epotential,eforce) = unsafe { ::ffi::calc_rebo_flat(md.position.clone(), _dim) };
-			assert_eq!(potential, epotential);
-			assert_eq!(force, eforce);
+			let (epotential,eforce) = unsafe { ::ffi::calc_rebo_flat(md.position.clone(), pbc) };
+			assert!((potential - epotential).abs() < 1e-7, "{} {}", potential, epotential);
+			assert!(izip!(&force, &eforce).all(|(&f,&e)| (f-e).abs() < 1e-7), "{:?} {:?}", force, eforce);
 		}
 
 		md.potential += potential;
@@ -224,14 +224,14 @@ impl Radial {
 		Radial { model: model, terms: terms, }
 	}
 
-	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) -> f64 {
+	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, pbc: Pbc) -> f64 {
 		let mut subtotal = 0.;
 		for &(i, j) in &self.terms {
 			assert!(i < j, "uniqueness condition");
 
 			let pi = tup3(&md.position, i);
 			let pj = tup3(&md.position, j);
-			let dvec = nearest_image_sub(pi, pj, dim);
+			let dvec = pbc.nearest_image_sub(pi, pj);
 
 			let ForceOut { force: signed_force, potential } = self.model.data(dvec.sqnorm().sqrt());
 			let f = normalize(dvec).mul_s(signed_force);
@@ -284,7 +284,7 @@ impl Angular {
 		Angular { model: model, terms: terms, }
 	}
 
-	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, dim: Trip<Float>) -> f64 {
+	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, pbc: Pbc) -> f64 {
 		let mut subtotal = 0.;
 
 		for &(i,j,k) in &self.terms {
@@ -303,20 +303,17 @@ impl Angular {
 				let pj = tup3(&md.position, j);
 				let pk = tup3(&md.position, k);
 
-				let pj = pi.add_v(nearest_image_sub(pj, pi, dim));
-				let pk = pj.add_v(nearest_image_sub(pk, pj, dim));
+				let pj = pbc.nearest_image_of(pj, pi);
+				let pk = pbc.nearest_image_of(pk, pj);
 
 				// move parent to origin
-				let (pi,pj,pk) = (pi,pj,pk).map(|x| x.sub_v(pj));
-
 				// rotate parent's parent to +z
-				let (_,θk,φk) = spherical_from_cart(pk);
-				let iso = rotate_y(-θk) * rotate_z(-φk);
-				let inv = iso.inverse_transformation();
+				let inv = pbc.look_at(pj, pk);
+				let iso = inv.inverse_transformation();
 				let (pi,pj,pk) = (pi,pj,pk).map(|x| applyP(iso, x));
 
 				// are things placed about where we expect?
-				assert!(pj.all(|x| x.abs() < 1e-5), "{:?}", pj);
+				assert!(pj.all(|x| x.abs() < 1e-5), "{:?} {:?} {:?}", pj, pi, pk);
 				assert!(pk.0.abs() < 1e-5, "{}", pk.0);
 				assert!(pk.1.abs() < 1e-5, "{}", pk.1);
 				assert!(pk.2 > 0.,         "{}", pk.2);

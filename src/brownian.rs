@@ -11,7 +11,7 @@ use ::std::iter::FromIterator;
 // in the presence of many fixed atoms.
 pub struct NeighborFinder {
 	positions: Vec<Trip<Cart>>,
-	dimension: Trip<Float>,
+	pbc: Pbc,
 	// tracks x +/- move_radius index on each axis
 	hints: Trip<Range<usize>>,
 	// Contains images in the fractional range [-1, 2] along each axis
@@ -19,39 +19,52 @@ pub struct NeighborFinder {
 }
 
 impl NeighborFinder {
-	pub fn new(dimension: Trip<Float>) -> Self {
+	pub fn new(pbc: Pbc) -> Self {
 		NeighborFinder {
 			positions: vec![],
-			dimension: dimension,
+			pbc: pbc,
 			hints: ((),(),()).map(|_| 0..0),
-			sorted: ((),(),()).map(|_| SortedIndices::new()),
+			sorted: ((),(),()).map(|_| {
+				// Keys at the far reaches of outer space help simplify edge cases.
+				// The corresponding values should never be used.
+				let mut set = SortedIndices::default();
+				set.insert(::std::f64::NEG_INFINITY, ::std::usize::MAX);
+				set.insert(::std::f64::INFINITY, ::std::usize::MAX);
+				set
+			}),
 		}
 	}
 
-	pub fn from_positions<P:ToFrac,I:IntoIterator<Item=P>>(dimension: Trip<f64>, pos: I) -> Self {
-		let mut this = NeighborFinder::new(dimension);
+	pub fn from_positions<I:IntoIterator<Item=Trip<Cart>>>(pos: I, pbc: Pbc) -> Self {
+		let mut this = NeighborFinder::new(pbc);
 		for x in pos {
-			this.insert(reduce_pbc(x.frac(dimension)));
+			this.insert(pbc.wrap(x));
 		}
 		this
 	}
 
-	fn update_cursors(&mut self, frac: Trip<Frac>, radius: Cart) {
-		let radii = self.dimension.map(|d| radius.frac(d));
+	fn update_cursors(&mut self, point: Trip<Cart>, radius: Cart) {
+		let point = self.pbc.wrap(point);
 
-		zip_with!((frac, radii, self.sorted.as_ref(), self.hints.as_mut())
-		|x,r,set,hints| {
-			hints.start = update_lower_hint(hints.start, &set.keys, x - r);
-			hints.end   = update_upper_hint(hints.end,   &set.keys, x + r);
+		zip_with!((point, self.sorted.as_ref(), self.hints.as_mut())
+		|x,set,hints| {
+			hints.start = update_lower_hint(hints.start, &set.keys, x - radius);
+			hints.end   = update_upper_hint(hints.end,   &set.keys, x + radius);
 		});
 	}
 
-	pub fn insert(&mut self, point: Trip<Frac>) {
-		let point = reduce_pbc(point);
-		let i = self.positions.len();
-		self.positions.push(point.cart(self.dimension));
+	pub fn insert(&mut self, point: Trip<Cart>) {
+		let point = self.pbc.wrap(point);
 
-		zip_with!((point, self.sorted.as_mut()) |x, set| set.insert_images(x, i));
+		let i = self.positions.len();
+		self.positions.push(point);
+
+		zip_with!((point, self.sorted.as_mut(), self.pbc.dim) |x, set, dim| {
+			// periodic images above and below simplify edge cases
+			set.insert(x, i);
+			set.insert(x - dim, i);
+			set.insert(x + dim, i);
+		});
 	}
 
 	pub fn cursor_neighborhood(&self) -> Set<usize> {
@@ -63,31 +76,31 @@ impl NeighborFinder {
 		).fold1(|a, b| (&a) & (&b))
 	}
 
-	pub fn closest_neighbor(&mut self, point: Trip<Frac>, radius: Cart) -> Option<usize> {
+	pub fn closest_neighbor(&mut self, point: Trip<Cart>, radius: Cart) -> Option<usize> {
 		let indices = self.neighborhood(point, radius);
 		indices.into_iter()
-			.map(|i| (Some(i), nearest_image_dist_sq(point, self.positions[i], self.dimension)))
+			.map(|i| (Some(i), self.pbc.distance(point, self.positions[i])))
 			// locate tuple with minimum distance; unfortunately, Iterator::min_by is unstable.
 			.fold((None,::std::f64::MAX), |(i,p),(k,q)| if p < q { (i,p) } else { (k,q) })
 			.0
 	}
 
-	fn neighborhood_from_candidates<I: IntoIterator<Item=usize>>(&self, point: Trip<Frac>, radius: Cart, indices: I) -> Vec<usize> {
-		indices.into_iter().filter(|&i| {
-			nearest_image_dist_sq(point, self.positions[i], self.dimension) <= radius*radius
-		}).collect()
+	fn neighborhood_from_candidates<I: IntoIterator<Item=usize>>(&self, point: Trip<Cart>, radius: Cart, indices: I) -> Vec<usize> {
+		indices.into_iter().filter(|&i|
+			self.pbc.distance(point, self.positions[i]) <= radius
+		).collect()
 	}
 
 	// Identify indices of atoms within a sphere of the given radius about a point.
 	// Optimized for the case where each call considers a point/radius very similar
 	//  to the previous call.
-	pub fn neighborhood(&mut self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
+	pub fn neighborhood(&mut self, point: Trip<Cart>, radius: Cart) -> Vec<usize> {
 		self.update_cursors(point, radius);
 		let candidates = self.cursor_neighborhood();
 		self.neighborhood_from_candidates(point, radius, candidates)
 	}
 
-	pub fn bruteforce_neighborhood(&self, point: Trip<Frac>, radius: Cart) -> Vec<usize> {
+	pub fn bruteforce_neighborhood(&self, point: Trip<Cart>, radius: Cart) -> Vec<usize> {
 		self.neighborhood_from_candidates(point, radius, 0..self.positions.len())
 	}
 }
@@ -96,40 +109,11 @@ impl NeighborFinder {
 // fulfills two needs which BTreeMap fails to satisfy:
 //  * support for PartialOrd
 //  * multiple values may have same key
-// and also has a few oddly-placed bits of logic specific to our application.
-type Key = Frac;
+type Key = f64;
 type Value = usize;
+#[derive(Default)]
 struct SortedIndices {keys: Vec<Key>, values: Vec<Value>}
 impl SortedIndices {
-	fn new() -> Self {
-		// specific to our application:
-		//    Keys at the far reaches of outer space help simplify edge cases.
-		//    The corresponding values should never be used.
-		SortedIndices {
-			keys:   vec![Frac(::std::f64::NEG_INFINITY), Frac(::std::f64::INFINITY)],
-			values: vec![0, ::std::usize::MAX],
-		}
-	}
-
-	// initialize with indices into an enumerable sequence
-	fn rebuild<I:IntoIterator<Item=Key>>(iter: I) -> Self {
-		let mut this = SortedIndices::new();
-		for (v,x) in iter.into_iter().enumerate() {
-			this.insert_images(x, v);
-		}
-		this
-	}
-
-	// specific to our application;
-	//    Images one period above and below are stored to simplify edge cases.
-	fn insert_images(&mut self, k: Key, v: Value) {
-		let k = Frac((k.0 + 1.).fract()); // FIXME HACK
-		assert!(Frac(0.) <= k && k <= Frac(1.), "{:?}", k);
-		self.insert(k, v);
-		self.insert(k - Frac(1.), v);
-		self.insert(k + Frac(1.), v);
-	}
-
 	fn insert(&mut self, k: Key, v: Value) {
 		let i = self.lower_bound(k);
 		self.keys.insert(i, k); self.values.insert(i, v);
@@ -142,13 +126,13 @@ impl SortedIndices {
 	}
 }
 
-fn update_lower_hint(mut hint: usize, sorted: &[Frac], needle: Frac) -> usize {
+fn update_lower_hint(mut hint: usize, sorted: &[Cart], needle: Cart) -> usize {
 	while needle <= sorted[hint] { hint -= 1; }
 	while needle >  sorted[hint] { hint += 1; }
 	hint
 }
 
-fn update_upper_hint(mut hint: usize, sorted: &[Frac], needle: Frac) -> usize {
+fn update_upper_hint(mut hint: usize, sorted: &[Cart], needle: Cart) -> usize {
 	while needle <  sorted[hint] { hint -= 1; }
 	while needle >= sorted[hint] { hint += 1; }
 	hint

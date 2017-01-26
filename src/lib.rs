@@ -11,8 +11,10 @@
 pub mod common;
 use common::*;
 
-const DIMENSION: Trip<Float> = (100., 100., 100.);
-const IS_VACUUM: Trip<bool> = (true, true, true);
+const PBC: Pbc = Pbc {
+	dim: (100., 100., 100.),
+	vacuum: (true, true, true),
+};
 const NPARTICLE: usize = 200;
 
 const DEBUG: bool = false; // generates a general debug file
@@ -81,7 +83,7 @@ pub mod mains {
 		::serde_json::to_writer(&mut File::create("xyz-debug/tree.json").unwrap(), &tree).unwrap();
 	}
 
-	pub fn hex_test() { ::hexagon_nucleus(DIMENSION); }
+	pub fn hex_test() { ::hexagon_nucleus(PBC); }
 
 	pub fn gen_test() { ::test_outputs(); }
 
@@ -94,7 +96,7 @@ pub mod mains {
 fn dla_run() -> Tree {
 	let PER_STEP = 2;
 
-	let mut tree = hexagon_nucleus(DIMENSION);
+	let mut tree = hexagon_nucleus(PBC);
 
 	let mut rng = rand::weak_rng();
 	let mut timer = Timer::new(30);
@@ -106,19 +108,17 @@ fn dla_run() -> Tree {
 	for dla_step in 0..NPARTICLE {
 		err!("Particle {:8} of {:8}: ", dla_step, NPARTICLE);
 
-		let mut finder = NeighborFinder::from_positions(tree.dimension, tree.pos.clone());
+		let mut finder = NeighborFinder::from_positions(tree.pos.clone(), tree.pbc);
 
-		let mut pos = random_border_position(&mut rng);
+		let mut pos = random_border_position(&mut rng, tree.pbc);
 
 		// move until ready to place
 		while finder.neighborhood(pos, nbr_radius).is_empty() {
 			//errln!("({:4},{:4},{:4})  ({:8?} ms)",
-			//	(pos.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000);
+			//	(pbc.0).0, (pos.1).0, (pos.2).0, (precise_time_ns() - start_time)/1000);
 
-			let disp = random_direction(&mut rng)
-				.mul_s(MOVE_RADIUS).frac(tree.dimension);
-
-			pos = reduce_pbc(pos.add_v(disp));
+			let disp = random_direction(&mut rng).mul_s(MOVE_RADIUS);
+			pos = tree.pbc.wrap(pos.add_v(disp));
 		}
 
 		// introduce at random angles
@@ -147,12 +147,12 @@ fn dla_run() -> Tree {
 			let first_new_index = tree.len() - PER_STEP;
 			let nbrhood_center = tree.pos[first_new_index];
 
-			finder.neighborhood(nbrhood_center.frac(tree.dimension), RELAX_NEIGHBORHOOD_RADIUS)
+			finder.neighborhood(nbrhood_center, RELAX_NEIGHBORHOOD_RADIUS)
 			.into_iter()
 			.chain(first_new_index..tree.len()) // the new indices are not yet in state
 			.filter(|&i| tree.labels[i] != Label::Si)
 			// ascending by distance
-			.map(|i| (i, nearest_image_dist_sq(nbrhood_center, tree.pos[i], tree.dimension)))
+			.map(|i| (i, tree.pbc.distance(nbrhood_center, tree.pos[i])))
 			.sorted_by(|&(_,a), &(_,b)| a.partial_cmp(&b).unwrap())
 			.into_iter().take(RELAX_MAX_PARTICLE_COUNT)
 			.map(|(i,_)| i)
@@ -174,17 +174,17 @@ fn dla_run() -> Tree {
 		};
 
 		// debugging info
+		let frac = tree.pbc.frac(tree.pbc.wrap(pos));
 		timer.push();
 		errln!("({:8.6}, {:8.6}, {:8.6})  ({:5?} ms, avg: {:5?})  (relaxed {:3} in {:6} after {:?})",
-			(pos.0).0, (pos.1).0, (pos.2).0, timer.last_ms(), timer.average_ms(), n_free, n_relax_steps, stop_reason
+			frac.0, frac.1, frac.2, timer.last_ms(), timer.average_ms(), n_free, n_relax_steps, stop_reason
 		);
 
 		write_xyz(stdout(), &tree, Some(final_particles));
 	}
 
 	{
-		let dimension = tree.dimension;
-		let pos = tree.pos.clone().into_iter().map(|x| reduce_pbc(x.frac(dimension)).cart(dimension));
+		let pos = tree.pos.clone().into_iter().map(|x| tree.pbc.wrap(x));
 		write_xyz_(stdout(), pos, tree.labels.clone(), None);
 	}
 	assert_eq!(final_particles, tree.len());
@@ -280,7 +280,7 @@ where C:FnMut(&Fire), I: IntoIterator<Item=usize>, W: Write,
 			}
 
 			let mut md = zero_forces(md);
-			force.tally(&mut md, ffile.as_mut(), &free_indices, tree.dimension);
+			force.tally(&mut md, ffile.as_mut(), &free_indices, tree.pbc);
 			cb(&md);
 
 			md
@@ -304,7 +304,6 @@ extern crate test;
 extern crate rand;
 #[macro_use] extern crate homogenous;
 #[macro_use] extern crate itertools;
-#[macro_use] extern crate newtype_ops;
 extern crate dla_sys;
 extern crate libc;
 extern crate num;
@@ -360,19 +359,19 @@ pub struct Tree {
 	labels: Vec<Label>,
 	pos: Vec<Trip<Cart>>,
 	parents: Vec<usize>,
-	dimension: Trip<Float>,
+	pbc: Pbc,
 }
 
 impl Tree {
-	fn from_two(dimension: Trip<Float>, length: Cart, labels: (Label,Label)) -> Self {
-		Tree::from_two_pos(dimension, (CART_ORIGIN, (0., length, 0.)), labels)
+	fn from_two(pbc: Pbc, length: Cart, labels: Pair<Label>) -> Self {
+		Tree::from_two_pos(pbc, (CART_ORIGIN, (0., length, 0.)), labels)
 	}
-	fn from_two_pos(dimension: Trip<Float>, pos: (Trip<Cart>, Trip<Cart>), labels: (Label,Label)) -> Self {
+	fn from_two_pos(pbc: Pbc, pos: Pair<Trip<Cart>>, labels: Pair<Label>) -> Self {
 		Tree {
 			labels:  vec![labels.0, labels.1],
 			pos:     vec![pos.0, pos.1],
 			parents: vec![1, 0],
-			dimension: dimension,
+			pbc: pbc,
 		}
 	}
 
@@ -395,7 +394,7 @@ impl Tree {
 		assert!(parent < self.len());
 
 		// put the parent at the origin and its parent along +Z
-		let iso = look_at_pbc(self.pos[parent], self.pos[self.parents[parent]], self.dimension);
+		let iso = self.pbc.look_at(self.pos[parent], self.pos[self.parents[parent]]);
 		// add an atom in this basis
 		let pos = cart_from_spherical((length, 120f64.to_radians(), beta));
 		// back to cartesian
@@ -462,15 +461,14 @@ fn random_direction<R:Rng>(mut rng: R) -> Trip<Cart> {
 	normalize(((),(),()).map(|_| normal.ind_sample(&mut rng) as Float))
 }
 
-fn random_border_position<R:Rng>(mut rng: R) -> Trip<Frac> {
-	// random point
-	let mut point = ((),(),()).map(|_| Frac(rng.next_f64() as Float));
+fn random_border_position<R:Rng>(mut rng: R, pbc: Pbc) -> Trip<Cart> {
+	let mut point = pbc.random_point_in_volume(&mut rng);
 
 	// project onto a vacuum face
 	loop {
 		let k = rng.gen_range(0, 3);
-		if IS_VACUUM.into_nth(k) {
-			*point.mut_nth(k) = Frac(0.);
+		if pbc.vacuum.into_nth(k) {
+			*point.mut_nth(k) = 0.;
 			break;
 		}
 	}
@@ -479,8 +477,8 @@ fn random_border_position<R:Rng>(mut rng: R) -> Trip<Frac> {
 
 // for debugging the isometries; this should be a barbell shape, with
 // 4 atoms protruding from each end in 4 diagonal directions
-fn barbell_nucleus(dimension: Trip<f64>) -> Tree {
-	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (Label::Si, Label::C));
+fn barbell_nucleus(pbc: Pbc) -> Tree {
+	let mut tree = Tree::from_two(pbc, DIMER_INITIAL_SEP, (Label::Si, Label::C));
 	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*0.0);
 	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
 	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*1.0);
@@ -492,11 +490,11 @@ fn barbell_nucleus(dimension: Trip<f64>) -> Tree {
 	tree
 }
 
-fn random_barbell_nucleus(dimension: Trip<f64>) -> Tree {
+fn random_barbell_nucleus(pbc: Pbc) -> Tree {
 	let dir = random_direction(rand::weak_rng());
-	let pos1 = ((),(),()).map(|_| Frac(rand::weak_rng().next_f64())).cart(dimension);
+	let pos1 = pbc.random_point_in_volume(&mut rand::weak_rng());
 	let pos2 = pos1.add_v(dir.mul_s(DIMER_INITIAL_SEP));
-	let mut tree = Tree::from_two_pos(dimension, (pos1,pos2), (Label::Si, Label::C));
+	let mut tree = Tree::from_two_pos(pbc, (pos1,pos2), (Label::Si, Label::C));
 	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*0.0);
 	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
 	tree.attach_new(0, Label::Si, DIMER_INITIAL_SEP, PI*1.0);
@@ -508,21 +506,21 @@ fn random_barbell_nucleus(dimension: Trip<f64>) -> Tree {
 	tree
 }
 
-fn one_dimer(dimension: Trip<f64>) -> Tree {
-	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (Label::Si, Label::Si));
-	tree.transform_mut(translate(dimension.mul_s(0.5)));
+fn one_dimer(pbc: Pbc) -> Tree {
+	let mut tree = Tree::from_two(pbc, DIMER_INITIAL_SEP, (Label::Si, Label::Si));
+	tree.transform_mut(translate(pbc.center()));
 	tree
 }
 
-fn hexagon_nucleus(dimension: Trip<f64>) -> Tree {
+fn hexagon_nucleus(pbc: Pbc) -> Tree {
 	// HACK meaning of attachment angle is arbitrary (beyond being fixed on a per-atom basis)
 	//  so hardcoded angles are trouble
-	let mut tree = Tree::from_two(dimension, DIMER_INITIAL_SEP, (Label::Si, Label::Si));
+	let mut tree = Tree::from_two(pbc, DIMER_INITIAL_SEP, (Label::Si, Label::Si));
 	let i = tree.attach_new(1, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
 	let i = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
 	let i = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
 	let _ = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
-	tree.transform_mut(translate(dimension.mul_s(0.5)));
+	tree.transform_mut(translate(pbc.center()));
 	tree.perturb_mut(0.1);
 
 	let free_indices = 0..tree.len();
@@ -542,10 +540,10 @@ fn test_outputs() {
 		write_xyz(File::create(path).unwrap(), &tree, None);
 	};
 
-	doit(barbell_nucleus(DIMENSION), "barbell.xyz");
-	doit(random_barbell_nucleus(DIMENSION), "barbell-random.xyz");
+	doit(barbell_nucleus(PBC), "barbell.xyz");
+	doit(random_barbell_nucleus(PBC), "barbell-random.xyz");
 
-	doit(hexagon_nucleus(DIMENSION), "hexagon.xyz");
+	doit(hexagon_nucleus(PBC), "hexagon.xyz");
 }
 
 fn distances_from_tree(tree: &Tree) -> Vec<f64> {

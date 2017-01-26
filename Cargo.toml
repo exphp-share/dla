@@ -9,7 +9,6 @@ authors = ["Michael Lamparski <diagonaldevice@gmail.com>"]
 time = "0.1"
 rand = "0.3"
 itertools = "0.5"
-newtype-ops = "0.1.3"
 libc = "0.2"
 nalgebra = "0.10"
 num = "*"
