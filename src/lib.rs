@@ -36,6 +36,11 @@ const FORCE_PARAMS_SRC: ::force::Params = ::force::Params {
 	rebo: true,
 };
 
+const GRID_LATTICE_PARAMS: ::grid::LatticeParams = ::grid::LatticeParams {
+	a: 1.41,
+	c: 2.0,
+};
+
 const ZERO_FORCE: ::force::Params = ::force::Params { rebo: false, radial: Model::Zero, angular: Model::Zero };
 const WITHOUT_REBO: ::force::Params = ::force::Params { rebo: false, ..FORCE_PARAMS_SRC };
 const JUST_REBO: ::force::Params = ::force::Params { rebo: true, ..ZERO_FORCE };
@@ -81,6 +86,17 @@ pub mod mains {
 	pub fn dla() {
 		let tree = ::dla_run();
 		::serde_json::to_writer(&mut File::create("xyz-debug/tree.json").unwrap(), &tree).unwrap();
+	}
+
+	pub fn grid() {
+		let grid = grid::dla_run();
+		let mut tree = grid.to_tree(GRID_LATTICE_PARAMS);
+		::serde_json::to_writer(&mut File::create("xyz-debug/grid.json").unwrap(), &tree).unwrap();
+		write_xyz(stdout(), &tree, None);
+
+		let free_indices = tree.carbons();
+		unsafe { relax_with_files(JUST_REBO, &mut tree, free_indices, "degrid", |_| {}) };
+		write_xyz(stdout(), &tree, None);
 	}
 
 	pub fn hex_test() { ::hexagon_nucleus(PBC); }
@@ -292,7 +308,7 @@ extern crate serde_json;
 extern crate serde;
 
 
-
+pub mod grid;
 pub mod force;
 pub mod fire;
 pub mod ffi;
@@ -319,8 +335,6 @@ use std::f64::consts::PI;
 use force::Model;
 use fire::Fire;
 
-// This type exists mostly for ease of serialization
-// (otherwise simple &'static str constants would do)
 #[derive(Copy,Clone,Eq,PartialEq,Ord,PartialOrd,Hash,Serialize,Deserialize,Debug)]
 pub enum Label { C, Si }
 impl Label {
@@ -334,8 +348,7 @@ impl Label {
 
 //---------------------------------
 
-// NOTE this isn't even pretending to be a tree any more.
-// It is more like a graph of constant out_degree == 1.
+// NOTE misnomer; not actually a tree; the first two atoms point to each other
 #[derive(Debug,Clone,Serialize,Deserialize)]
 pub struct Tree {
 	labels: Vec<Label>,
