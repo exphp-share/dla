@@ -12,9 +12,9 @@ itertools = "0.5"
 libc = "0.2"
 nalgebra = "0.10"
 num = "*"
-serde = "0.8"
-serde_json = "0.8"
-serde_derive = "0.8"
+serde = "0.9"
+serde_json = "0.9"
+serde_derive = "0.9"
 
 [dependencies.homogenous]
 git = "file:///home/lampam/cpp/other/rust/homogenous"
