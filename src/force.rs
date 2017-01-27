@@ -56,7 +56,7 @@ impl Composite {
 	// * Writes detailed stats to debug files.
 	// It is _quite decidedly_ not pure.
 	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, pbc: Pbc) -> f64 {
-		let subtotal_rebo    = unsafe { self.rebo.tally(md, ffile.as_mut(), free_indices, pbc) };
+		let subtotal_rebo    = self.rebo.tally(md, ffile.as_mut(), free_indices, pbc);
 		let subtotal_radial  = self.radial.tally(md, ffile.as_mut(), free_indices, pbc);
 		let subtotal_angular = self.angular.tally(md, ffile.as_mut(), free_indices, pbc);
 
@@ -179,7 +179,7 @@ impl PersistentRebo {
 
 		let (potential,force) = unsafe { ::ffi::persistent_calc(md.position.clone()) };
 		if ::VALIDATE_REBO {
-			let (epotential,eforce) = unsafe { ::ffi::calc_rebo_flat(md.position.clone(), pbc) };
+			let (epotential,eforce) = ::ffi::calc_rebo_flat(md.position.clone(), pbc);
 			assert!((potential - epotential).abs() < 1e-7, "{} {}", potential, epotential);
 			assert!(izip!(&force, &eforce).all(|(&f,&e)| (f-e).abs() < 1e-7), "{:?} {:?}", force, eforce);
 		}
@@ -217,7 +217,7 @@ impl Radial {
 
 			// eliminate useless ones
 			set.into_iter()
-				.filter(|&(i,j)| free_indices.contains(&i) || free_indices.contains(&j))
+				.filter(|&ij| ij.any(|i| free_indices.contains(&i)))
 				.collect()
 		};
 
@@ -267,6 +267,7 @@ impl Angular {
 			for i in 0..parents.len() {
 				let j = parents[i];
 				let k = parents[j];
+				// A term produces forces for both (i,j,k) and (k,j,i), so canonicalize.
 				match i.cmp(&k) {
 					Ordering::Less    => { set.insert((i,j,k)); },
 					Ordering::Greater => { set.insert((k,j,i)); },
@@ -274,7 +275,7 @@ impl Angular {
 				}
 			}
 
-			// Each term potentially affects any of the three indices (but not the third).
+			// Each term potentially affects any of the three indices.
 			// Drop those that can't do anything.
 			set.into_iter()
 				.filter(|&ijk| ijk.any(|i| free_indices.contains(&i)))
@@ -297,7 +298,7 @@ impl Angular {
 			// This closure will:
 			//   * write the forces
 			//   * RETURN the potentials (for further inspection)
-			let potentials = ((i,j,k), (k,j,i)).map(|(i,j,k)| {
+			let datas = ((i,j,k), (k,j,i)).map(|(i,j,k)| {
 
 				let pi = tup3(&md.position, i);
 				let pj = tup3(&md.position, j);
@@ -343,11 +344,13 @@ impl Angular {
 				// directions and the middle one (j) receives the opposing forces
 				if free_indices.contains(&i) { tup3add(&mut md.force, i, f); }
 				if free_indices.contains(&j) { tup3add(&mut md.force, j, f.mul_s(-1.)) };
-				potential
+				(potential, θi)
 			});
+			let potentials = datas.map(|x| x.0);
+			let thetas = datas.map(|x| x.1);
 
 			// Both directions should have witnessed the same potential...
-			assert!(potentials.0.approx_eq(&potentials.1), "{:?}", potentials);
+			assert!(potentials.0.approx_eq(&potentials.1), "{:?} {:?}", potentials, thetas);
 			// ...but we only want to add it once.
 			subtotal += potentials.0;
 

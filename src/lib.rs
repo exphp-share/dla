@@ -12,7 +12,7 @@ pub mod common;
 use common::*;
 
 const PBC: Pbc = Pbc {
-	dim: (100., 100., 100.),
+	dim: (100., 100., 20.),
 	vacuum: (true, true, true),
 };
 const NPARTICLE: usize = 200;
@@ -31,8 +31,8 @@ const FORCE_PARAMS: ::force::Params = FORCE_PARAMS_SRC;
 //const FORCE_PARAMS: ::force::Params = WITHOUT_REBO;
 
 const FORCE_PARAMS_SRC: ::force::Params = ::force::Params {
-	radial: Model::Morse { center: 1.41, D: 100., k: 400. },
-	angular: Model::Quadratic { center: (120.*PI/180.), k: 400. },
+	radial: Model::Morse { center: 1.41, D: 100., k: 40. },
+	angular: Model::Quadratic { center: (120.*PI/180.), k: 40. },
 	rebo: true,
 };
 
@@ -86,17 +86,22 @@ pub mod mains {
 	pub fn hex_test() { ::hexagon_nucleus(PBC); }
 
 	pub fn gen_test() { ::test_outputs(); }
-
-	pub fn reruns() {
-		let path = ::std::env::args().nth(1).unwrap_or("xyz-debug/tree.json".to_string());
-		::run_reruns_on(&path);
-	}
 }
 
 fn dla_run() -> Tree {
-	let PER_STEP = 2;
+	let tree = hexagon_nucleus(PBC);
+	let mut tree = wire_nucleus(tree, 3., ZERO_FORCE, BondStyle::Layers);
+	let mut i = 0;
+	while i < tree.len() {
+		tree.parents[i] = i+5;
+		i += 6;
+	}
+	dla_run_(tree)
+}
 
-	let mut tree = hexagon_nucleus(PBC);
+fn dla_run_(mut tree: Tree) -> Tree {
+	errln!("{:?}", tree);
+	let PER_STEP = 2;
 
 	let mut rng = rand::weak_rng();
 	let mut timer = Timer::new(30);
@@ -104,6 +109,12 @@ fn dla_run() -> Tree {
 
 	let nbr_radius = BROWNIAN_STOP_RADIUS;
 	let final_particles = PER_STEP*NPARTICLE + tree.len();
+
+	for file in &mut cond_file!(true, "xyz-debug/summary") {
+		writeln!(file, "{:?}", FORCE_PARAMS).unwrap();
+		writeln!(file, "{:?}", RELAX_PARAMS).unwrap();
+		writeln!(file, "{:?}", tree.pbc).unwrap();
+	}
 
 	for dla_step in 0..NPARTICLE {
 		err!("Particle {:8} of {:8}: ", dla_step, NPARTICLE);
@@ -207,40 +218,8 @@ fn dla_run() -> Tree {
 		write_xyz(stdout(), &tree, None);
 		errln!(" done in {} steps after {:?}...", n_steps, reason);
 	}
-	
+
 	tree
-}
-
-fn run_reruns_on(path: &str) {
-	let mut tree: Tree = serde_json::from_reader(&mut File::open(path).unwrap()).unwrap();
-
-	let free_indices = tree.carbons();
-
-	let mut params = FORCE_PARAMS;
-
-	let mut file = File::create(&format!("reruns-loop.xyz")).unwrap();
-
-	let semi_inclusive_linspace = |n,a,b| (0..n).map(move |i| a + (b-a) * i as f64/n as f64);
-
-	let n_frames_one_dir = 5;
-	let min_k = 0.;
-	let max_k = 100.;
-
-//	let ks_dsc = semi_inclusive_linspace(n_frames_one_dir, max_k, min_k);
-//	let ks_asc = semi_inclusive_linspace(n_frames_one_dir, min_k, max_k);
-	let mut ks = ::std::iter::once(100.).chain(semi_inclusive_linspace(5, 25., 0.)).chain(vec![0.]);
-
-	for (step, k) in ks.enumerate() {
-		params.radial.set_spring_constant(k).expect("kek");
-		params.angular.set_spring_constant(k).expect("kek");
-
-		let (n_relax_steps, reason) = unsafe {
-			relax_with_files(params, &mut tree, free_indices.clone(), &format!("reruns-{:03}", step), |_| {})
-		};
-
-		errln!("Step {:03} ended in {} steps after {:?}", step, n_relax_steps, reason);
-		write_xyz(&mut file, &tree, None);
-	}
 }
 
 /// Not reentrant; behavior is undefined if the callback also calls this function.
@@ -340,6 +319,8 @@ use std::f64::consts::PI;
 use force::Model;
 use fire::Fire;
 
+// This type exists mostly for ease of serialization
+// (otherwise simple &'static str constants would do)
 #[derive(Copy,Clone,Eq,PartialEq,Ord,PartialOrd,Hash,Serialize,Deserialize,Debug)]
 pub enum Label { C, Si }
 impl Label {
@@ -353,7 +334,8 @@ impl Label {
 
 //---------------------------------
 
-// NOTE misnomer; not actually a tree; the first two atoms point to each other
+// NOTE this isn't even pretending to be a tree any more.
+// It is more like a graph of constant out_degree == 1.
 #[derive(Debug,Clone,Serialize,Deserialize)]
 pub struct Tree {
 	labels: Vec<Label>,
@@ -535,6 +517,59 @@ fn hexagon_nucleus(pbc: Pbc) -> Tree {
 	}
 }
 
+fn round_to_multiple(x:f64, m:f64) -> f64 { (x / m).round() * m }
+
+enum BondStyle { Backbone, Vertical, Layers }
+fn wire_nucleus(mut tree: Tree, layer_sep: f64, force: ::force::Params, bond_style: BondStyle) -> Tree {
+	let layer_tree = tree.clone();
+
+	// ensure proper pbc length for periodicity
+	let n_layer = (tree.pbc.dim.2 as f64 / layer_sep).round() as usize;
+	tree.pbc.dim.2 = layer_sep * n_layer as f64;
+	tree.pbc.vacuum.2 = false;
+
+	// add the new layers
+	for layer in 1..n_layer {
+		let disp = (0., 0., layer as f64 * layer_sep);
+		match bond_style {
+			// produce mostly the same tree in each layer,
+			// but resolve the upper index in the two-way bond to the atom below.
+			BondStyle::Backbone => {
+				for (a,(&b,&pos)) in izip!(&layer_tree.parents, &layer_tree.pos).enumerate() {
+					let parent =
+						if a < b { a + (layer-1) * layer_tree.len() }
+						else { b + layer * layer_tree.len() };
+					tree.attach_at(parent, Label::Si, pos.add_v(disp));
+				}
+			},
+			BondStyle::Layers => {
+				for (&b,&pos) in izip!(&layer_tree.parents, &layer_tree.pos) {
+					tree.attach_at(0, Label::Si, pos.add_v(disp));
+					*tree.parents.last_mut().unwrap() = b + layer * layer_tree.len();
+				}
+			},
+			BondStyle::Vertical => {
+				// attach each atom to the one directly below it
+				for (a,&pos) in layer_tree.pos.iter().enumerate() {
+					tree.attach_at(a + (layer-1) * layer_tree.len(), Label::Si, pos.add_v(disp));
+				}
+			},
+		}
+	}
+
+	let free_indices = 0..tree.len();
+	let (_,reason) = unsafe { relax_with_files(force, &mut tree, free_indices, "start", |_| {}) };
+	match reason {
+		::fire::StopReason::Convergence => tree,
+		::fire::StopReason::Flailing => {
+			errln!("Warning: Core relaxation ended in flailing!");
+			tree
+		},
+		::fire::StopReason::Timeout => panic!("could not relax core"),
+	}
+}
+
+
 fn test_outputs() {
 	let doit = |tree, path| {
 		write_xyz(File::create(path).unwrap(), &tree, None);
@@ -556,5 +591,3 @@ fn distances_from_tree(tree: &Tree) -> Vec<f64> {
 	}
 	out
 }
-
-
