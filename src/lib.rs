@@ -18,8 +18,8 @@ const PBC: Pbc = Pbc {
 const NPARTICLE: usize = 200;
 
 const DEBUG: bool = false; // generates a general debug file
-const XYZ_DEBUG: Option<usize> = Some(30); // creates "xyz-debug/event-*.xyz"  files
-const FORCE_DEBUG: ForceDebug = ForceDebug::Summary; // creates "xyz-debug/force-*"
+const XYZ_DEBUG: Option<usize> = Some(1); // creates "xyz-debug/event-*.xyz"  files
+const FORCE_DEBUG: ForceDebug = ForceDebug::Full; // creates "xyz-debug/force-*"
 const VALIDATE_REBO: bool = false;
 
 #[derive(Copy,Clone,Debug,PartialOrd,Ord,Eq,PartialEq,Hash)]
@@ -102,11 +102,30 @@ pub mod mains {
 	pub fn hex_test() { ::hexagon_nucleus(PBC); }
 
 	pub fn gen_test() { ::test_outputs(); }
+
+	pub fn tree_info() {
+		let path = ::std::env::args().nth(1).unwrap_or("xyz-debug/tree.json".to_string());
+		let tree: Tree = serde_json::from_reader(&mut File::open(&path).unwrap()).unwrap();
+
+		let mut best = ::std::f64::INFINITY;
+		for (i,&p) in tree.pos.iter().enumerate() {
+			for (k,&q) in tree.pos.iter().enumerate() {
+				let cur = tree.pbc.distance(p,q);
+				if cur < best && i != k {
+					best = cur;
+					println!("{}", best);
+				}
+			}
+		}
+	}
 }
 
 fn dla_run() -> Tree {
 	let tree = hexagon_nucleus(PBC);
 	let mut tree = wire_nucleus(tree, 3., ZERO_FORCE, BondStyle::Layers);
+	// FIXME Terrifyingly misplaced hack;
+	// turns the hexagon wire layers into 6-cycles rather than 2-cycles with 4-strands.
+	// Make this part of the hexagon nucleus or fix this before using different nucleus
 	let mut i = 0;
 	while i < tree.len() {
 		tree.parents[i] = i+5;

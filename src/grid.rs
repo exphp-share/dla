@@ -1,6 +1,6 @@
 
 const GRID_DIM: Pos3 = (120, 120, 20);
-const NPARTICLE: usize = 1000;
+const NPARTICLE: usize = 100;
 
 const LATTICE_A: f64 = 1f64;
 const LATTICE_C: f64 = 1f64;
