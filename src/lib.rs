@@ -31,9 +31,9 @@ const FORCE_PARAMS: ::force::Params = FORCE_PARAMS_SRC;
 //const FORCE_PARAMS: ::force::Params = WITHOUT_REBO;
 
 const FORCE_PARAMS_SRC: ::force::Params = ::force::Params {
-	radial: Model::Morse { center: 1.41, D: 100., k: 40. },
-	angular: Model::Quadratic { center: (120.*PI/180.), k: 40. },
-	rebo: true,
+	radial: Some(Model::Morse { center: 1.41, D: 100., k: 40. }),
+	angular: Some(Model::Quadratic { center: (120.*PI/180.), k: 40. }),
+	rebo: Some(()),
 };
 
 const GRID_LATTICE_PARAMS: ::grid::LatticeParams = ::grid::LatticeParams {
@@ -41,9 +41,9 @@ const GRID_LATTICE_PARAMS: ::grid::LatticeParams = ::grid::LatticeParams {
 	c: 2.0,
 };
 
-const ZERO_FORCE: ::force::Params = ::force::Params { rebo: false, radial: Model::Zero, angular: Model::Zero };
-const WITHOUT_REBO: ::force::Params = ::force::Params { rebo: false, ..FORCE_PARAMS_SRC };
-const JUST_REBO: ::force::Params = ::force::Params { rebo: true, ..ZERO_FORCE };
+const ZERO_FORCE: ::force::Params = ::force::Params { rebo: None, radial: None, angular: None };
+const WITHOUT_REBO: ::force::Params = ::force::Params { rebo: None, ..FORCE_PARAMS_SRC };
+const JUST_REBO: ::force::Params = ::force::Params { rebo: Some(()), ..ZERO_FORCE };
 
 // Simulates recent bugs... (these options exist to help identify the bug's impact)
 const DOUBLE_COUNTED_RADIAL_POTENTIAL: bool = false;

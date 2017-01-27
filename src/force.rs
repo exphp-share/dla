@@ -18,9 +18,9 @@ use ::nalgebra::ApproxEq;
 
 #[derive(Copy,Clone,Debug,PartialEq)]
 pub struct Params {
-	pub radial: Model,
-	pub angular: Model,
-	pub rebo: bool,
+	pub radial: Option<Model>,
+	pub angular: Option<Model>,
+	pub rebo: Option<()>,
 }
 
 // NOTE: Hey you.
@@ -33,9 +33,9 @@ pub struct Params {
 // This is perfectly fine just the way it is.
 #[derive(PartialEq,Debug)]
 pub struct Composite {
-	radial: Radial,
-	angular: Angular,
-	rebo: PersistentRebo,
+	radial: Option<Radial>,
+	angular: Option<Angular>,
+	rebo: Option<PersistentRebo>,
 }
 
 impl Composite {
@@ -44,9 +44,9 @@ impl Composite {
 	pub unsafe fn prepare(params: Params, tree: &Tree, free_indices: &Set<usize>) -> Self {
 		let parents = &tree.parents;
 		Composite {
-			radial: Radial::prepare(params.radial, free_indices, parents),
-			angular: Angular::prepare(params.angular, free_indices, parents),
-			rebo: PersistentRebo::prepare(params.rebo, &tree),
+			radial: params.radial.map(|params| Radial::prepare(params, free_indices, parents)),
+			angular: params.angular.map(|params| Angular::prepare(params, free_indices, parents)),
+			rebo: params.rebo.map(|params| PersistentRebo::prepare(params, &tree)),
 		}
 	}
 
@@ -56,9 +56,9 @@ impl Composite {
 	// * Writes detailed stats to debug files.
 	// It is _quite decidedly_ not pure.
 	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, pbc: Pbc) -> f64 {
-		let subtotal_rebo    = self.rebo.tally(md, ffile.as_mut(), free_indices, pbc);
-		let subtotal_radial  = self.radial.tally(md, ffile.as_mut(), free_indices, pbc);
-		let subtotal_angular = self.angular.tally(md, ffile.as_mut(), free_indices, pbc);
+		let subtotal_rebo    = self.rebo.as_ref().map(   |force| force.tally(md, ffile.as_mut(), free_indices, pbc)).unwrap_or(0.);
+		let subtotal_radial  = self.radial.as_ref().map( |force| force.tally(md, ffile.as_mut(), free_indices, pbc)).unwrap_or(0.);
+		let subtotal_angular = self.angular.as_ref().map(|force| force.tally(md, ffile.as_mut(), free_indices, pbc)).unwrap_or(0.);
 
 		for file in &mut ffile {
 			writeln!(file, "SUBTOTAL REBO    V= {:22.18}", subtotal_rebo).unwrap();
@@ -75,7 +75,6 @@ impl Composite {
 pub enum Model {
 	Morse { center: f64, D: f64, k: f64, },
 	Quadratic { center: f64, k: f64, },
-	Zero,
 }
 
 #[derive(Copy,Clone,Debug,PartialEq)]
@@ -102,7 +101,6 @@ impl Model {
 					force:     2. * a * D * f * (f - 1.),
 				}
 			},
-			Model::Zero => { ForceOut { potential: 0., force: 0. } },
 		}
 	}
 
@@ -110,7 +108,8 @@ impl Model {
 		match *self {
 			Model::Quadratic { ref mut k, .. } => *k = x,
 			Model::Morse     { ref mut k, .. } => *k = x,
-			_ => return Err(()),
+			// NOTE: historical artefact; currently, all implemented forces have a spring constant
+//			_ => return Err(()),
 		}
 		Ok(())
 	}
@@ -134,16 +133,14 @@ pub struct Angular {
 }
 
 #[derive(PartialEq,Copy,Clone,Debug)]
-pub struct Rebo(pub bool);
+pub struct Rebo(());
 #[derive(PartialEq,Debug)]
-pub struct PersistentRebo(bool);
+pub struct PersistentRebo(());
 
 impl Rebo {
-	pub fn prepare(active: bool, _tree: &Tree) -> Self { Rebo(active) }
+	pub fn prepare((): (), _tree: &Tree) -> Self { Rebo(()) }
 
 	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, pbc: Pbc) -> f64 {
-		if !self.0 { return 0.; }
-
 		let (potential,force) = ::ffi::calc_rebo_flat(md.position.clone(), pbc);
 
 		md.potential += potential;
@@ -167,16 +164,12 @@ impl Rebo {
 impl PersistentRebo {
 	/// Behavior is undefined if this is used to create an active PersistentRebo
 	/// when another one already exists.
-	pub unsafe fn prepare(active: bool, tree: &Tree) -> Self {
-		if active {
-			::ffi::persistent_init(flatten(&tree.pos), tree.pbc);
-		}
-		PersistentRebo(active)
+	pub unsafe fn prepare((): (), tree: &Tree) -> Self {
+		::ffi::persistent_init(flatten(&tree.pos), tree.pbc);
+		PersistentRebo(())
 	}
 
 	pub fn tally<W:Write>(&self, md: &mut Fire, mut ffile: Option<W>, free_indices: &Set<usize>, pbc: Pbc) -> f64 {
-		if !self.0 { return 0.; }
-
 		let (potential,force) = unsafe { ::ffi::persistent_calc(md.position.clone()) };
 		if ::VALIDATE_REBO {
 			let (epotential,eforce) = ::ffi::calc_rebo_flat(md.position.clone(), pbc);
