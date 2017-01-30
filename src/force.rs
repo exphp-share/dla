@@ -94,10 +94,7 @@ impl Model {
 				let a = (k/(2. * D)).sqrt();
 				let f = (a * (center - x)).exp();
 				ForceOut {
-					potential:
-						if ::ERRONEOUS_MORSE_PREFACTOR { a * D * square(f - 1.) }
-						else { D * square(f - 1.) }
-					,
+					potential: D * square(f - 1.),
 					force:     2. * a * D * f * (f - 1.),
 				}
 			},
@@ -239,11 +236,6 @@ impl Radial {
 			// Yes, it is correct for the potential to always be added once,
 			// regardless of how many of the atoms are fixed.
 			subtotal += potential;
-			// NOTE: this simulates the behavior of the code prior to the recent refactor
-			// FIXME: remove once no longer of interest
-			if ::DOUBLE_COUNTED_RADIAL_POTENTIAL && free_indices.contains(&i) && free_indices.contains(&j) {
-				subtotal += potential;
-			}
 
 			if free_indices.contains(&i) { tup3add(&mut md.force, i, f) }
 			if free_indices.contains(&j) { tup3add(&mut md.force, j, f.mul_s(-1.)) }
@@ -346,12 +338,6 @@ impl Angular {
 			assert!(potentials.0.approx_eq(&potentials.1), "{:?} {:?}", potentials, thetas);
 			// ...but we only want to add it once.
 			subtotal += potentials.0;
-
-			if ::DOUBLE_COUNTED_ANGULAR_POTENTIAL {
-				if free_indices.contains(&j) || (free_indices.contains(&i) && free_indices.contains(&k)) {
-					subtotal += potentials.0;
-				}
-			}
 		}
 		md.potential += subtotal;
 		subtotal

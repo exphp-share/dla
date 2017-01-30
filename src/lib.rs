@@ -45,11 +45,6 @@ const ZERO_FORCE: ::force::Params = ::force::Params { rebo: None, radial: None, 
 const WITHOUT_REBO: ::force::Params = ::force::Params { rebo: None, ..FORCE_PARAMS_SRC };
 const JUST_REBO: ::force::Params = ::force::Params { rebo: Some(()), ..ZERO_FORCE };
 
-// Simulates recent bugs... (these options exist to help identify the bug's impact)
-const DOUBLE_COUNTED_RADIAL_POTENTIAL: bool = false;
-const DOUBLE_COUNTED_ANGULAR_POTENTIAL: bool = false;
-const ERRONEOUS_MORSE_PREFACTOR: bool = false;
-
 const RELAX_PARAMS: ::fire::Params =
 	::fire::Params {
 		timestep_start: 1e-3,
