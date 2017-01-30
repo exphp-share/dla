@@ -7,6 +7,7 @@ authors = ["Michael Lamparski <diagonaldevice@gmail.com>"]
 
 [dependencies]
 time = "0.1"
+term = "*"
 rand = "0.3"
 itertools = "0.5"
 libc = "0.2"

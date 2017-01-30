@@ -38,7 +38,7 @@ const FORCE_PARAMS_SRC: ::force::Params = ::force::Params {
 
 const GRID_LATTICE_PARAMS: ::grid::LatticeParams = ::grid::LatticeParams {
 	a: 1.41,
-	c: 2.0,
+	c: 2.8,
 };
 
 const ZERO_FORCE: ::force::Params = ::force::Params { rebo: None, radial: None, angular: None };
@@ -91,11 +91,20 @@ pub mod mains {
 	pub fn grid() {
 		let grid = grid::dla_run();
 		let mut tree = grid.to_tree(GRID_LATTICE_PARAMS);
+		tree.perturb_mut(0.3, |lbl| lbl == Label::C);
 		::serde_json::to_writer(&mut File::create("xyz-debug/grid.json").unwrap(), &tree).unwrap();
 		write_xyz(stdout(), &tree, None);
 
+		let t0 = ::time::precise_time_ns();
 		let free_indices = tree.carbons();
-		unsafe { relax_with_files(JUST_REBO, &mut tree, free_indices, "degrid", |_| {}) };
+		unsafe { relax_with_files(JUST_REBO, &mut tree, free_indices, "degrid", |md| {
+			::term::stderr().map(|mut x| x.carriage_return().ok());
+			err!("Relaxing step {:10}, time= {:6}, V= {:24.18}, dt= {:24.18} α= {:24.18}",
+				md.nstep,
+				(::time::precise_time_ns() - t0) / 1_000_000_000,
+				md.potential, md.timestep, md.alpha
+			);
+		}) };
 		write_xyz(stdout(), &tree, None);
 	}
 
@@ -314,6 +323,7 @@ where C:FnMut(&Fire), I: IntoIterator<Item=usize>, W: Write,
 
 // what a mess I've made; how did we accumulate so many dependencies? O_o
 extern crate time;
+extern crate term;
 extern crate test;
 extern crate rand;
 #[macro_use] extern crate homogenous;
@@ -395,10 +405,12 @@ impl Tree {
 		}
 	}
 
-	fn perturb_mut(&mut self, r: Cart) {
+	fn perturb_mut<F:FnMut(Label) -> bool>(&mut self, r: Cart, mut pred: F) {
 		let mut rng = rand::weak_rng();
-		for p in &mut self.pos {
-			*p = (*p).add_v(random_direction(&mut rng).mul_s(r));
+		for (p, &lbl) in izip!(&mut self.pos, &self.labels) {
+			if pred(lbl) {
+				*p = (*p).add_v(random_direction(&mut rng).mul_s(r));
+			}
 		}
 	}
 
@@ -535,7 +547,7 @@ fn hexagon_nucleus(pbc: Pbc) -> Tree {
 	let i = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
 	let _ = tree.attach_new(i, Label::Si, DIMER_INITIAL_SEP, PI*0.5);
 	tree.transform_mut(translate(pbc.center()));
-	tree.perturb_mut(0.1);
+	tree.perturb_mut(0.1, |_| true);
 
 	let free_indices = 0..tree.len();
 	let (_,reason) = unsafe { relax_with_files(FORCE_PARAMS, &mut tree, free_indices, "start", |_| {}) };
