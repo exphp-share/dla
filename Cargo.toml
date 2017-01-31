@@ -2,16 +2,11 @@
 name = "dla"
 version = "0.1.0"
 authors = ["Michael Lamparski <diagonaldevice@gmail.com>"]
-#build = "build.rs"
-
 
 [dependencies]
 time = "0.1"
-term = "*"
 rand = "0.3"
 itertools = "0.5"
-libc = "0.2"
-nalgebra = "0.10"
 num = "*"
 serde = "0.9"
 serde_json = "0.9"
@@ -19,6 +14,3 @@ serde_derive = "0.9"
 
 [dependencies.homogenous]
 git = "file:///home/lampam/cpp/other/rust/homogenous"
-
-[dependencies.dla_sys]
-git = "file:///home/lampam/asd/class/research/dla-sys"
