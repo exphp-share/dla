@@ -45,9 +45,9 @@ macro_rules! cond_file {
 }
 
 fn main() {
-	let grid = grid::dla_run();
+	let grid = grid::dla_run(GRID_LATTICE_PARAMS);
+	::serde_json::to_writer(&mut File::create("xyz-debug/grid.json").unwrap(), &grid).unwrap();
 	let tree = grid.to_structure(GRID_LATTICE_PARAMS);
-	::serde_json::to_writer(&mut File::create("xyz-debug/grid.json").unwrap(), &tree).unwrap();
 	write_xyz(stdout(), &tree, None);
 }
 

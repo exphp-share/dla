@@ -4,7 +4,9 @@ const NPARTICLE: usize = 50000;
 
 const CORE_RADIUS: f64 = 5f64;
 
-const EXPANSION_THRESHOLD: f64 = 0.30;
+/// Higher value <=> less frequent expansion of grid size
+/// (note: max value is not 1.0, but rather root(3)/2 (I think))
+const EXPANSION_THRESHOLD: f64 = 1.0;
 const EXPANSION_FACTOR: f64 = 1.05;
 
 const VETO_THRESHOLD: f64 = 0.20;
@@ -39,7 +41,7 @@ type Tile = Option<Label>;
 type Pos = i32;
 type Pos2 = (i32, i32);
 type Pos3 = (i32, i32, i32);
-#[derive(Clone,PartialEq,Debug)]
+#[derive(Clone,PartialEq,Debug,Serialize,Deserialize)]
 pub struct Grid {
 	dim: Pos3,
 	grid: Vec<Tile>,
@@ -72,19 +74,10 @@ impl Grid {
 		Box::new(iproduct!(rx, ry, rz))
 	}
 
-	// NOTE: range is 0.0 (on top of an edge) to 0.5 (at center), and corresponds to the
-	// fractional distance to the nearest edge
-	fn edge_distance(&self, pos: Pos3) -> f64 {
-		let mut edge_dist = zip_with!((pos, self.dim)
-			|p,d| (p as f64 + 0.5).min((d-p) as f64 - 0.5) / d as f64);
-		edge_dist.2 = ::std::f64::INFINITY; // z doesn't count
-		let min = edge_dist.fold1(|a,b| if a < b { a } else { b });
-		assert!(0.0 <= min && min < 1.0);
-		min
-	}
+	fn center(&self) -> Pos3 { self.dim.div_s(2) }
 
 	fn wrap(&self, pos: Pos3, disp: Pos3) -> Pos3 {
-		zip_with!((pos, disp, self.dim) |x,dx,m| mod_floor(x+dx, m))
+		zip_with!((pos, disp, self.dim) |x,dx,m| fast_mod_floor(x+dx, m))
 	}
 	fn is_occupied(&self, pos: Pos3) -> bool { self.occupant(pos).is_some() }
 	fn occupant(&self, pos: Pos3) -> Option<Label> { self.grid[self.index(pos)] }
@@ -172,6 +165,17 @@ fn dimer_disps(LatticeParams { a, .. }: LatticeParams) -> Vec<Trip<f64>> {
 
 fn mod_floor(a: i32, m: i32) -> i32 { ((a % m) + m) % m }
 
+// NOTE: this was indeed tested to be about 10x faster than mod_floor
+//       for moduli not known at compile time
+fn fast_mod_floor(a: i32, m: i32) -> i32 {
+	debug_assert!(0 <= a && a < m, "failed precondition ({} mod {})", a, m);
+	match a {
+		-1 => m-1,
+		x if x == m => 0,
+		x => x,
+	}
+}
+
 pub fn lattice(lattice: LatticeParams) -> Trip<Trip<f64>> {
 	(0,1,2).map(|n| cartesian(lattice, (0i32,0i32,0i32).update_nth(n, |_| 1)))
 }
@@ -208,12 +212,10 @@ fn random_border_position<R: Rng>(mut rng: R, grid: &Grid) -> Pos3 {
 	pos
 }
 
-fn add_nucleation_site(mut grid: Grid) -> Grid {
+fn add_nucleation_site(lattice: LatticeParams, mut grid: Grid) -> Grid {
 	// a cylinder
-	let center = grid.dim.map(|d| d/2);
-
 	for pos in grid.indices() {
-		let (x,y,_) = cartesian(::GRID_LATTICE_PARAMS, pos.sub_v(center));
+		let (x,y,_) = cartesian(lattice, pos.sub_v(grid.center()));
 		if (x*x + y*y) <= CORE_RADIUS*CORE_RADIUS + 1e-10 {
 			grid.occupy(pos, Label::Si);
 		}
@@ -233,13 +235,13 @@ fn is_fillable(grid: &Grid, pos: Pos3) -> bool {
 		.any(|pq| pq.all(|&p| grid.is_occupied(p)))
 }
 
-pub fn dla_run() -> Grid {
+pub fn dla_run(lattice: LatticeParams) -> Grid {
 	let grid = Grid::new(GRID_DIM);
-	let grid = add_nucleation_site(grid);
-	dla_run_(grid)
+	let grid = add_nucleation_site(lattice, grid);
+	dla_run_(lattice, grid)
 }
 
-pub fn dla_run_(mut grid: Grid) -> Grid {
+pub fn dla_run_(lattice: LatticeParams, mut grid: Grid) -> Grid {
 	let mut rng = ::rand::weak_rng();
 	let mut timer = ::timer::Timer::new(20);
 
@@ -249,17 +251,19 @@ pub fn dla_run_(mut grid: Grid) -> Grid {
 
 		// move until ready to place
 		let mut veto = VetoState::new();
+		let mut roll_count = 0;
 		while !is_fillable(&grid, pos) {
+			roll_count += 1;
 
 			let valid_disps =
 				grid.displacements.iter().cloned()
 					.filter(|&disp| !grid.is_occupied(grid.wrap(pos, disp)))
 					.collect_vec();
 
-			let mut disp = (0,0,0);
+			let mut disp;
 			while {
 				disp = *rng.choose(&valid_disps).expect("no possible moves! (this is unexpected!)");
-				veto.veto(&mut rng, &grid, pos, disp)
+				veto.veto(&mut rng, &grid, lattice, pos, disp)
 			} { }
 
 			pos = grid.wrap(pos, disp);
@@ -278,9 +282,12 @@ pub fn dla_run_(mut grid: Grid) -> Grid {
 
 		grid.occupy(pos, Label::C);
 		timer.push();
-		errln!("({:3},{:3},{:3})   ({:8} ms, {:8} avg)", pos.0, pos.1, pos.2, timer.last_ms(), timer.average_ms());
+		errln!("({:3},{:3},{:3})   ({:6} ms, {:6} avg) ({:7} steps, {:7} vetos)",
+			pos.0, pos.1, pos.2, timer.last_ms(), timer.average_ms(),
+			roll_count, veto.count);
 
-		if grid.edge_distance(pos) < EXPANSION_THRESHOLD {
+		let dist_to_center = cartesian(lattice, pos.sub_v(grid.center())).sqnorm().sqrt();
+		if dist_to_center / grid.dim.0 as f64 > EXPANSION_THRESHOLD {
 			grid = expand(grid, EXPANSION_FACTOR)
 		}
 	}
@@ -289,9 +296,7 @@ pub fn dla_run_(mut grid: Grid) -> Grid {
 
 pub fn expand(grid: Grid, factor: f64) -> Grid {
 	let mut new_dim = grid.dim.map(|d| (d as f64 * factor).round() as i32);
-	//let mut shift = new_dim.sub_v(grid.dim).div_s(2);
 	new_dim.2 = grid.dim.2;
-	//shift.2 = 0;
 
 	let sites = grid.indices().filter(|&p| grid.is_occupied(p)).collect_vec();
 	let mins = sites.iter().cloned().fold(grid.dim, |a,b| zip_with!((a,b) ::std::cmp::min));
@@ -311,21 +316,26 @@ pub fn expand(grid: Grid, factor: f64) -> Grid {
 
 struct VetoState {
 	delay: u32,
+	count: u32,
 }
 
 impl VetoState {
-	pub fn new() -> Self { VetoState { delay: 0 } }
-	pub fn veto<R: Rng>(&mut self, rng: &mut R, grid: &Grid, pos: Pos3, disp: Pos3) -> bool {
+	pub fn new() -> Self { VetoState { delay: 0, count: 0 } }
+	pub fn veto<R: Rng>(&mut self, rng: &mut R, grid: &Grid, lattice: LatticeParams, pos: Pos3, disp: Pos3) -> bool {
+		let get_rsq = |pos: Pos3| cartesian(lattice, pos.sub_v(grid.center())).sqnorm();
 		match self.delay {
 			0 => {
-				if pos.sub_v(grid.dim.div_s(2)).mul_v(disp).sum() < 0 { return false; }
-				let prob = (1.0 - grid.edge_distance(pos)) * VETO_MAX_CHANCE;
-				rng.next_f64() < prob
+				// compare distances before and after.
+				// don't worry about wrapping; we're really testing the direction, not the destination
+				if get_rsq(pos.add_v(disp)) >= get_rsq(pos) {
+					if rng.next_f64() < VETO_MAX_CHANCE {
+						self.count += 1;
+						return true;
+					}
+				}
 			},
-			_ => {
-				self.delay -= 1;
-				false
-			},
+			_ => { self.delay -= 1; },
 		}
+		false
 	}
 }
