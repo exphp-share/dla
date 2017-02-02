@@ -2,6 +2,7 @@
 // BEWARE OF DOG
 
 #![feature(non_ascii_idents)]
+#![feature(field_init_shorthand)]
 #![feature(test)]
 #![allow(dead_code)]
 //#![allow(unused_imports)]
@@ -45,10 +46,19 @@ macro_rules! cond_file {
 }
 
 fn main() {
-	let grid = grid::dla_run(GRID_LATTICE_PARAMS);
-	::serde_json::to_writer(&mut File::create("xyz-debug/grid.json").unwrap(), &grid).unwrap();
-	let tree = grid.to_structure(GRID_LATTICE_PARAMS);
-	write_xyz(stdout(), &tree, None);
+	let out_dir: ::std::path::PathBuf =
+		::std::env::args().nth(1).expect("missing output dir name").into();
+
+	let ofile = |s| File::create(&out_dir.join(s)).unwrap();
+	let lattice = GRID_LATTICE_PARAMS;
+
+	let _ = ::std::fs::create_dir(&out_dir);
+	let grid = grid::dla_run(lattice);
+	::serde_json::to_writer(&mut ofile("grid.json"), &grid.to_sparse()).unwrap();
+	::serde_json::to_writer(&mut ofile("lattice.json"), &::grid::lattice(GRID_LATTICE_PARAMS)).unwrap();
+	::grid::write_poscar(ofile("grid.poscar"), lattice, &grid).unwrap();
+	let tree = grid.to_structure(lattice);
+	write_xyz(ofile("grid.xyz"), &tree, None);
 }
 
 #[derive(Copy,Clone,Eq,PartialEq,Ord,PartialOrd,Hash,Serialize,Deserialize,Debug)]

@@ -1,12 +1,12 @@
 
 const GRID_DIM: Pos3 = (100, 100, 160);
-const NPARTICLE: usize = 50000;
+const NPARTICLE: usize = 7500;
 
 const CORE_RADIUS: f64 = 5f64;
 
 /// Higher value <=> less frequent expansion of grid size
 /// (note: max value is not 1.0, but rather root(3)/2 (I think))
-const EXPANSION_THRESHOLD: f64 = 1.0;
+const EXPANSION_THRESHOLD: f64 = 0.8;
 const EXPANSION_FACTOR: f64 = 1.05;
 
 const VETO_THRESHOLD: f64 = 0.20;
@@ -17,6 +17,7 @@ use ::Label;
 use ::common::*;
 
 use ::std::f64::INFINITY;
+use ::std::io::prelude::*;
 use ::rand::Rng;
 use ::homogenous::prelude::*;
 use ::homogenous::numeric::prelude::*;
@@ -119,11 +120,16 @@ impl Grid {
 			assert!(p.zip(dim).all(|(x,d)| 0. <= x && x <= d), "{:?} {:?}", p, dim);
 		}
 
-		::Structure {
-			pos: pos,
-			labels: labels,
-			dim: dim,
-		}
+		::Structure { pos, labels, dim }
+	}
+
+	pub fn to_sparse(self: &Grid) -> SparseGrid {
+		let dim = self.dim;
+		let (pos,label): (Vec<_>,Vec<_>) = self.indices()
+				.filter(|&p| self.is_occupied(p))
+				.map(|p| (p, self.occupant(p).unwrap()))
+				.unzip();
+		SparseGrid { pos, label, dim }
 	}
 }
 
@@ -337,5 +343,62 @@ impl VetoState {
 			_ => { self.delay -= 1; },
 		}
 		false
+	}
+}
+
+/// Like Itertools::group_by, but the groups are not limited to being contiguous.
+/// It is strict, as evidenced by the return type.
+use ::std::collections::btree_map::BTreeMap as Map;
+fn nonlocal_groups_by<V, I:IntoIterator<Item=V>, K: Ord, F: FnMut(&V) -> K>(iter: I, mut key: F) -> Map<K,Vec<V>> {
+	iter.into_iter()
+		.sorted_by(|a,b| key(a).cmp(&key(b))).into_iter()
+		.group_by(key).into_iter()
+		.map(|(k,g)| (k, g.collect()))
+		.collect()
+}
+
+pub fn write_poscar<W:Write>(mut file: W, lattice: LatticeParams, grid: &Grid) -> ::std::io::Result<()> {
+	writeln!(file, "blah blah blah")?;
+	writeln!(file, "1.0")?;
+	zip_with!((self::lattice(lattice), grid.dim) |unit_vec, n| {
+		let (x,y,z) = unit_vec.mul_s(n as f64);
+		writeln!(file, "  {} {} {}", x, y, z).unwrap();
+	});
+
+	let indices = grid.indices().filter(|&p| grid.is_occupied(p));
+	let groups = nonlocal_groups_by(indices, |&p| grid.occupant(p).unwrap());
+
+	for (label,_) in &groups { write!(file, " {}", label.as_str())?; }
+	writeln!(file)?;
+
+	for (_, idx) in &groups { write!(file, " {}", idx.len())?; }
+	writeln!(file)?;
+
+	writeln!(file, "Cartesian")?;
+
+	for (label, idxs) in groups {
+		for idx in idxs {
+			let (x,y,z) = cartesian(lattice, idx);
+			writeln!(file, "{} {} {} {}", x, y, z, label.as_str())?;
+		}
+	}
+	Ok(())
+}
+
+// more useful to serialize...
+#[derive(Clone,Debug,Serialize,Deserialize)]
+pub struct SparseGrid {
+	pos: Vec<Pos3>,
+	label: Vec<Label>,
+	dim: Pos3,
+}
+
+impl SparseGrid {
+	pub fn to_grid(&self) -> Grid {
+		let mut grid = Grid::new(self.dim);
+		for (&p, &lbl) in izip!(&self.pos, &self.label) {
+			grid.occupy(p, lbl);
+		}
+		grid
 	}
 }
