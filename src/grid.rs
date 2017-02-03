@@ -1,6 +1,7 @@
 
-const GRID_DIM: Pos3 = (100, 100, 160);
-const NPARTICLE: usize = 7500;
+const GRID_DIM: Pos3 = (100, 100, 640);
+const NPARTICLE: usize = 10_000_000;
+const CB_FREQUENCY: usize = 5_000;
 
 const CORE_RADIUS: f64 = 5f64;
 
@@ -174,7 +175,7 @@ fn mod_floor(a: i32, m: i32) -> i32 { ((a % m) + m) % m }
 // NOTE: this was indeed tested to be about 10x faster than mod_floor
 //       for moduli not known at compile time
 fn fast_mod_floor(a: i32, m: i32) -> i32 {
-	debug_assert!(0 <= a && a < m, "failed precondition ({} mod {})", a, m);
+	debug_assert!(-1 <= a && a <= m, "failed precondition ({} mod {})", a, m);
 	match a {
 		-1 => m-1,
 		x if x == m => 0,
@@ -241,17 +242,21 @@ fn is_fillable(grid: &Grid, pos: Pos3) -> bool {
 		.any(|pq| pq.all(|&p| grid.is_occupied(p)))
 }
 
-pub fn dla_run(lattice: LatticeParams) -> Grid {
+pub fn dla_run<F:FnMut(&Grid)>(lattice: LatticeParams, mut cb: F) -> Grid {
 	let grid = Grid::new(GRID_DIM);
 	let grid = add_nucleation_site(lattice, grid);
-	dla_run_(lattice, grid)
+	dla_run_(lattice, grid, cb)
 }
 
-pub fn dla_run_(lattice: LatticeParams, mut grid: Grid) -> Grid {
+pub fn dla_run_<F:FnMut(&Grid)>(lattice: LatticeParams, mut grid: Grid, mut cb: F) -> Grid {
 	let mut rng = ::rand::weak_rng();
 	let mut timer = ::timer::Timer::new(20);
 
 	for n in 0..NPARTICLE {
+		if n % CB_FREQUENCY == 0 {
+			cb(&grid);
+		}
+
 		err!("Particle {:8} of {:8}: ", n, NPARTICLE);
 		let mut pos = random_border_position(&mut rng, &grid);
 
@@ -292,11 +297,12 @@ pub fn dla_run_(lattice: LatticeParams, mut grid: Grid) -> Grid {
 			pos.0, pos.1, pos.2, timer.last_ms(), timer.average_ms(),
 			roll_count, veto.count);
 
-		let dist_to_center = cartesian(lattice, pos.sub_v(grid.center())).sqnorm().sqrt();
+		let dist_to_center = cartesian(lattice, pos.sub_v(grid.center()).update_nth(2, |_| 0)).sqnorm().sqrt();
 		if dist_to_center / grid.dim.0 as f64 > EXPANSION_THRESHOLD {
 			grid = expand(grid, EXPANSION_FACTOR)
 		}
 	}
+	cb(&grid);
 	grid
 }
 

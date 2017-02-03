@@ -49,16 +49,34 @@ fn main() {
 	let out_dir: ::std::path::PathBuf =
 		::std::env::args().nth(1).expect("missing output dir name").into();
 
-	let ofile = |s| File::create(&out_dir.join(s)).unwrap();
 	let lattice = GRID_LATTICE_PARAMS;
 
-	let _ = ::std::fs::create_dir(&out_dir);
-	let grid = grid::dla_run(lattice);
-	::serde_json::to_writer(&mut ofile("grid.json"), &grid.to_sparse()).unwrap();
-	::serde_json::to_writer(&mut ofile("lattice.json"), &::grid::lattice(GRID_LATTICE_PARAMS)).unwrap();
-	::grid::write_poscar(ofile("grid.poscar"), lattice, &grid).unwrap();
+	let mut prev_thread = None::<::std::thread::JoinHandle<()>>;
+	let grid = grid::dla_run(lattice, |grid| {
+		if let Some(handle) = prev_thread.take() {
+			handle.join().unwrap();
+		}
+
+		let grid = grid.clone();
+		let out_dir = out_dir.clone();
+		prev_thread = Some(::std::thread::spawn(move || {
+			let ofilepath = |s| out_dir.join(s);
+			let ofile = |s| File::create(&ofilepath(s)).unwrap();
+			let _ = ::std::fs::create_dir(&out_dir);
+
+			::serde_json::to_writer(&mut ofile("lattice.json.tmp"), &::grid::lattice(GRID_LATTICE_PARAMS)).unwrap();
+			::serde_json::to_writer(&mut ofile("grid.json.tmp"), &grid.to_sparse()).unwrap();
+			::grid::write_poscar(ofile("grid.vasp.tmp"), lattice, &grid).unwrap();
+			let tree = grid.to_structure(lattice);
+			write_xyz(ofile("grid.xyz.tmp"), &tree, None);
+
+			::std::fs::rename(&ofilepath("lattice.json.tmp"), &ofilepath("lattice.json")).unwrap();
+			::std::fs::rename(&ofilepath("grid.json.tmp"),    &ofilepath("grid.json")).unwrap();
+			::std::fs::rename(&ofilepath("grid.vasp.tmp"),    &ofilepath("grid.vasp")).unwrap();
+			::std::fs::rename(&ofilepath("grid.xyz.tmp"),     &ofilepath("grid.xyz")).unwrap();
+		}));
+	});
 	let tree = grid.to_structure(lattice);
-	write_xyz(ofile("grid.xyz"), &tree, None);
 }
 
 #[derive(Copy,Clone,Eq,PartialEq,Ord,PartialOrd,Hash,Serialize,Deserialize,Debug)]
