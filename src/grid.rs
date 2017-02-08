@@ -1,9 +1,10 @@
 
-const GRID_DIM: Pos3 = (100, 100, 640);
-const NPARTICLE: usize = 10_000_000;
+//const GRID_DIM: Pos3 = (100, 100, 80);
+const GRID_DIM: Pos3 = (500, 500, 80);
+const NPARTICLE: usize = 2*75_000;
 const CB_FREQUENCY: usize = 5_000;
 
-const CORE_RADIUS: f64 = 5f64;
+const CORE_RADIUS: f64 = 150f64;
 
 /// Higher value <=> less frequent expansion of grid size
 /// (note: max value is not 1.0, but rather root(3)/2 (I think))
@@ -131,6 +132,10 @@ impl Grid {
 				.map(|p| (p, self.occupant(p).unwrap()))
 				.unzip();
 		SparseGrid { pos, label, dim }
+	}
+
+	pub fn rhosq(&self, pos: Pos3, lattice: LatticeParams) -> f64 {
+		cartesian(lattice, pos.sub_v(self.center()).update_nth(2, |_| 0)).sqnorm()
 	}
 }
 
@@ -297,7 +302,7 @@ pub fn dla_run_<F:FnMut(&Grid)>(lattice: LatticeParams, mut grid: Grid, mut cb: 
 			pos.0, pos.1, pos.2, timer.last_ms(), timer.average_ms(),
 			roll_count, veto.count);
 
-		let dist_to_center = cartesian(lattice, pos.sub_v(grid.center()).update_nth(2, |_| 0)).sqnorm().sqrt();
+		let dist_to_center = grid.rhosq(pos, lattice).sqrt();
 		if dist_to_center / grid.dim.0 as f64 > EXPANSION_THRESHOLD {
 			grid = expand(grid, EXPANSION_FACTOR)
 		}
@@ -334,7 +339,7 @@ struct VetoState {
 impl VetoState {
 	pub fn new() -> Self { VetoState { delay: 0, count: 0 } }
 	pub fn veto<R: Rng>(&mut self, rng: &mut R, grid: &Grid, lattice: LatticeParams, pos: Pos3, disp: Pos3) -> bool {
-		let get_rsq = |pos: Pos3| cartesian(lattice, pos.sub_v(grid.center())).sqnorm();
+		let get_rsq = |pos: Pos3| grid.rhosq(pos, lattice);
 		match self.delay {
 			0 => {
 				// compare distances before and after.

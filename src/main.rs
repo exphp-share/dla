@@ -34,7 +34,7 @@ use std::fs::File;
 
 const GRID_LATTICE_PARAMS: ::grid::LatticeParams = ::grid::LatticeParams {
 	a: 1.41,
-	c: 1.41,
+	c: 3.4,
 };
 
 macro_rules! cond_file {
@@ -44,6 +44,20 @@ macro_rules! cond_file {
 		} else { None }
 	};
 }
+
+/*
+fn main() {
+	let lattice = GRID_LATTICE_PARAMS;
+
+	for z in 0..80 {
+
+		let sparse: ::grid::SparseGrid = ::serde_json::from_reader(&mut File::open(&format!("layer-{}.json", z)).unwrap()).unwrap();
+		let grid = sparse.to_grid();
+		let tree = grid.to_structure(lattice);
+		write_xyz(&mut File::create(&format!("layer-{}.xyz", z)).unwrap(), &tree, None);
+	}
+}
+*/
 
 fn main() {
 	let out_dir: ::std::path::PathBuf =
