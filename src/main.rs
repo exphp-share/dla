@@ -3,6 +3,8 @@
 
 #![feature(non_ascii_idents)]
 #![feature(field_init_shorthand)]
+#![feature(inclusive_range_syntax)]
+#![feature(range_contains)]
 #![feature(test)]
 #![allow(dead_code)]
 //#![allow(unused_imports)]
