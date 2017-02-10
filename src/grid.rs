@@ -1,22 +1,21 @@
 
 //const GRID_DIM: Pos3 = (100, 100, 80);
 const GRID_DIM: Dim3 = (Vacuum(500), Vacuum(500), Periodic(80));
-const NPARTICLE: usize = 2*75_000;
+const NPARTICLE: usize = 8*75_000;
+
 const CB_FREQUENCY: usize = 5_000;
 
 const CORE_RADIUS: f64 = 150f64;
 
-const INTRODUCTION_RADIUS: f64 = 1000f64;
-const ELIMINATION_RADIUS:  f64 = 3000f64;
 
-/// Higher value <=> less frequent expansion of grid size
-/// (note: max value is not 1.0, but rather root(3)/2 (I think))
-const EXPANSION_THRESHOLD: f64 = 0.8;
 const EXPANSION_FACTOR: f64 = 1.05;
 
-const VETO_THRESHOLD: f64 = 0.20;
-const VETO_DELAY: u32 = 100;
-const VETO_MAX_CHANCE: f64 = 0.02;
+// multiples of max existing distance
+const INTRODUCTION_RADIUS: f64 = 1.01f64;
+const ELIMINATION_RADIUS: f64 = 7.0f64;
+const VETO_RADIUS: f64 = 3.0;
+const VETO_CHANCE: f64 = 0.002;
+const VETO_DELAY: u32 = 0;
 
 use ::Label;
 use ::common::*;
@@ -125,6 +124,10 @@ impl Grid {
 				Periodic(dim) => fast_mod_floor(x + dx, dim),
 			}
 		)
+	}
+
+	fn neighbors<'a>(&'a self, pos: Pos3) -> Box<Iterator<Item=Pos3>+'a> {
+		Box::new(self.displacements.iter().cloned().map(move |disp| self.wrap(pos,disp)))
 	}
 
 	fn in_bounds(&self, pos: Pos3) -> bool { pos.zip(self.dim).all(|(x,dim)| dim.contains(x)) }
@@ -241,9 +244,6 @@ fn neighbor_displacements() -> Vec<Pos3> {
 	out
 }
 
-// this makes no attempt to be isotropic;
-// the angle distribution is "not quite right",
-// and edges/vertices of the cube are slightly favored
 fn random_border_position<R: Rng>(lattice: LatticeParams, mut rng: R, grid: &Grid, radius: f64) -> Pos3 {
 	// too lazy to generalize this
 	debug_assert_eq!(grid.dim.map(|d| d.periodic().is_some()), (false,false,true));
@@ -270,7 +270,6 @@ fn nearest_hex_lattice_point(lattice: LatticeParams, pos: (f64,f64)) -> (Pos,Pos
 		.unwrap()
 }
 
-
 fn add_nucleation_site(lattice: LatticeParams, mut grid: Grid) -> Grid {
 	// a cylinder
 	for pos in grid.valid_positions() {
@@ -279,6 +278,17 @@ fn add_nucleation_site(lattice: LatticeParams, mut grid: Grid) -> Grid {
 			grid.occupy(pos, Label::Si);
 		}
 	}
+
+	hollow_out_enclosed(grid, |x| x==Label::Si)
+}
+
+pub fn hollow_out_enclosed<P: FnMut(Label)->bool>(mut grid: Grid, mut p: P) -> Grid {
+	// identify them all first before actually touching anything
+	let mut vec = grid.valid_positions().collect_vec();
+	vec.retain(|&pos| grid.occupant(pos).map(&mut p).unwrap_or(false) && grid.neighbors(pos).all(|nbr| grid.occupant(nbr).map(&mut p).unwrap_or(false)));
+
+	for pos in vec { grid.set_occupant(pos, None); }
+
 	grid
 }
 
@@ -297,53 +307,66 @@ fn is_fillable(grid: &Grid, pos: Pos3) -> bool {
 pub fn dla_run<F:FnMut(&Grid)>(lattice: LatticeParams, mut cb: F) -> Grid {
 	let grid = Grid::new(GRID_DIM);
 	let grid = add_nucleation_site(lattice, grid);
-	dla_run_(lattice, grid, cb)
+	dla_run_with(lattice, grid, cb)
 }
 
-pub fn dla_run_<F:FnMut(&Grid)>(lattice: LatticeParams, mut grid: Grid, mut cb: F) -> Grid {
+pub fn dla_run_with<F:FnMut(&Grid)>(lattice: LatticeParams, mut grid: Grid, mut cb: F) -> Grid {
 	let mut rng = ::rand::weak_rng();
 	let mut timer = ::timer::Timer::new(20);
 
+	let mut best_dist_sq = grid.valid_positions().filter(|&p| grid.is_occupied(p))
+		.map(|p| OrdOrDie(grid.center_distance_sq(p, lattice))).max().unwrap().0;
+
 	'event: for n in 0..NPARTICLE {
-		if n % CB_FREQUENCY == 0 {
+		if (n+1) % CB_FREQUENCY == 0 {
 			cb(&grid);
 		}
 
 		err!("Particle {:8} of {:8}: ", n, NPARTICLE);
-		let mut pos = random_border_position(lattice, &mut rng, &grid, INTRODUCTION_RADIUS);
-
-		// move until ready to place
-		let mut veto = VetoState::new();
+		let stop_pos;
+		let mut attempt_count = 0;
 		let mut roll_count = 0;
-		while !is_fillable(&grid, pos) {
-			roll_count += 1;
+		'elimination: loop {
+			attempt_count += 1;
+			let mut pos = random_border_position(lattice, &mut rng, &grid, INTRODUCTION_RADIUS * best_dist_sq.sqrt());
+			assert_eq!(grid.occupant(pos), None);
 
-			let valid_disps =
-				grid.displacements.iter().cloned()
-					.filter(|&disp| !grid.is_occupied(grid.wrap(pos, disp)))
-					.collect_vec();
+			// move until ready to place
+//			let mut veto = VetoState::new();
+			while !is_fillable(&grid, pos) {
+				roll_count += 1;
 
-			let mut disp;
-			while {
-				disp = *rng.choose(&valid_disps).expect("no possible moves! (this is unexpected!)");
-//				veto.veto(&mut rng, &grid, lattice, pos, disp)
-				false
-			} { }
+				let spaces = grid.neighbors(pos).filter(|&nbr| !grid.is_occupied(nbr)).collect_vec();
 
-			pos = grid.wrap(pos, disp);
+				let mut space;
+				while {
+					space = *rng.choose(&spaces).expect("no possible moves! (this is unexpected!)");
+	//				veto.veto(&mut rng, &grid, lattice, pos, space)
+					false
+				} { }
 
-			if grid.center_distance_sq(pos, lattice) > ELIMINATION_RADIUS * ELIMINATION_RADIUS {
-				continue 'event;
+				pos = space;
+
+				if grid.center_distance_sq(pos, lattice)/best_dist_sq > ELIMINATION_RADIUS * ELIMINATION_RADIUS {
+					continue 'elimination;
+				}
 			}
+			stop_pos = pos;
+			break 'elimination;
 		}
 
-		errln!("({:3},{:3},{:3})   ({:6} ms, {:6} avg) ({:7} steps, {:7} vetos)",
-			pos.0, pos.1, pos.2, timer.last_ms(), timer.average_ms(),
-			roll_count, veto.count);
+		let this_dist_sq = grid.center_distance_sq(stop_pos, lattice);
+		best_dist_sq = best_dist_sq.max(this_dist_sq);
+
+		timer.push();
+		errln!("({:3},{:3},{:3})   ({:6} ms, {:6} avg) ({:7} steps, {:7} attempts) (distance: {:12.5}) {}",
+			stop_pos.0, stop_pos.1, stop_pos.2, timer.last_ms(), timer.average_ms(),
+			roll_count, attempt_count, this_dist_sq.sqrt(),
+			if best_dist_sq == this_dist_sq { "*****" } else { "     " }
+		);
 
 		// place the particle
-		grid.occupy(pos, Label::C);
-		timer.push();
+		grid.occupy(stop_pos, Label::C);
 	}
 	cb(&grid);
 	grid
@@ -381,14 +404,15 @@ struct VetoState {
 
 impl VetoState {
 	pub fn new() -> Self { VetoState { delay: 0, count: 0 } }
-	pub fn veto<R: Rng>(&mut self, rng: &mut R, grid: &Grid, lattice: LatticeParams, pos: Pos3, disp: Pos3) -> bool {
+	pub fn veto<R: Rng>(&mut self, rng: &mut R, grid: &Grid, lattice: LatticeParams, pos: Pos3, space: Pos3) -> bool {
 		let get_rsq = |pos: Pos3| grid.center_distance_sq(pos, lattice);
+
+		// FIXME no use of VETO_RADIUS?
 		match self.delay {
 			0 => {
 				// compare distances before and after.
-				// don't worry about wrapping; we're really testing the direction, not the destination
-				if get_rsq(pos.add_v(disp)) >= get_rsq(pos) {
-					if rng.next_f64() < VETO_MAX_CHANCE {
+				if get_rsq(space) >= get_rsq(pos) {
+					if rng.next_f64() < VETO_CHANCE {
 						self.count += 1;
 						return true;
 					}
@@ -459,6 +483,17 @@ impl SparseGrid {
 			grid.occupy(p, lbl);
 		}
 		grid
+	}
+
+	// HACK; shouldn't exist
+	pub fn layer(&self, z: Pos) -> Self {
+		let mut idx = (0..self.pos.len()).collect_vec();
+		idx.retain(|&i| self.pos[i].2 == z);
+		let mut pos = idx.iter().map(|&i| self.pos[i]).collect_vec();
+		let label = idx.iter().map(|&i| self.label[i]).collect_vec();
+
+		for p in &mut pos { p.2 = 0; }
+		SparseGrid { pos, label, dim: self.dim }
 	}
 }
 
