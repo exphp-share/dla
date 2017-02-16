@@ -1,0 +1,28 @@
+relaxes into straight line
+
+Jan 9 2017 - straight line is a local minimum even for 6 atoms
+Jan 9 2017 - fix attachment distance and angle to 120 deg
+
+Feb 10 2017 - date is no typo.  Is that seriously all the notes I took???
+Feb 10 2017 - okay here's what I recall of how the 'workdir-nano' data was produced:
+              (which is the data that was ultimately rendered for the experimentalist)
+
+The details I remember are foggy and don't make sense:
+* Because it ran without memory errors, it must have been after 84797cec80957.
+* Because I recall having to manually modify the JSON file to add "Vacuum" and "Periodic"
+  strings to the 'dim' member, it must have been before a9edd305bbc8f.
+* I also strangely recall that, I reviewed the first intermediate output at 5000 steps,
+  and saw that the core was hollow... but after it finished running overnight, the core
+  was filled.
+  * (the only possible explanation for this is that I began running another output after adding
+     the changes for a hollow core; but that another calculation was already running from earlier,
+     and that that is the one that ran to the end)
+
+* lay.tk was created to produce POV files of all layers, but it was not used
+  because the images were too big to handle.
+* backgrounds have to be manually deleted from the POV before sending to POVRAY
+* prof.ini is for povray.  It is used in arguments like 'povray prof[fast]' etc.
+* All of the final images were rendered on my home pc, in '~/render'.
+  I used large images with +SC0.x +EC0.x etc arguments to render a small region at high quality,
+  then opened it in Gimp to crop out the non-rendered part.
+
